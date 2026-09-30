@@ -1,0 +1,74 @@
+# End-to-end Bicep pipeline for kit/bicep — the 4 gates from kit/bicep/README.md section 3
+#   Build (Gate 1, no Azure) -> dev (Gate 2+3, approval, Gate 4) -> prod (same, main only)
+# PRs run Build + dev what-if only; the deploy jobs skip on Build.Reason == PullRequest.
+#
+# One-time setup in Azure DevOps:
+#   Service connections : sc-azure-dev, sc-azure-prod (ARM, workload identity federation; RG Contributor is enough)
+#   Variable groups     : vg-bicep-dev, vg-bicep-prod -> RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret)
+#   Environments        : dev, prod (add approvals on prod)
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include:
+    - kit/bicep/*
+    - kit/pipelines/06-bicep-deploy.yml
+    - kit/pipelines/templates/bicep-stage.yml
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [kit/bicep/*]
+
+variables:
+  bicepDir: kit/bicep
+
+stages:
+# ---------- Gate 1: compile + lint every file, no Azure call ----------
+- stage: Build
+  jobs:
+  - job: Build
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+    - bash: |
+        set -euo pipefail
+        az bicep install                  # no-op when the agent already has it
+        for f in modules/*.bicep main.bicep main-rg.bicep; do
+          az bicep build -f "$f" --stdout >/dev/null && echo "OK  $f"
+        done
+        az bicep lint -f main-rg.bicep
+        az bicep lint -f main.bicep
+      displayName: Gate 1 build + lint
+      workingDirectory: $(bicepDir)
+    - task: CopyFiles@2
+      displayName: Stage deployable files
+      inputs:
+        SourceFolder: $(bicepDir)
+        Contents: |
+          *.bicep
+          *.bicepparam
+          modules/*.bicep
+        TargetFolder: $(Build.ArtifactStagingDirectory)/bicep
+    - publish: $(Build.ArtifactStagingDirectory)/bicep
+      artifact: bicep
+
+# ---------- Gates 2-4 per environment ----------
+- template: templates/bicep-stage.yml
+  parameters:
+    environment: dev
+    serviceConnection: sc-azure-dev
+    variableGroup: vg-bicep-dev
+    scope: resourceGroup                # KodeKloud / RG-scoped SPN: main-rg.bicep
+
+- ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+  - template: templates/bicep-stage.yml
+    parameters:
+      environment: prod
+      serviceConnection: sc-azure-prod
+      variableGroup: vg-bicep-prod
+      scope: resourceGroup              # 'subscription' = main.bicep creates the RG (drop the overrides: main.bicep lacks them)
+      paramOverrides: kvPurgeProtection=true kvSoftDeleteDays=90   # prod keeps the secure defaults; purge protection is permanent
+      dependsOn: [bicep_dev]

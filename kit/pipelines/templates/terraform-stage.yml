@@ -1,4 +1,5 @@
 # Lives in repo: Platform/pipeline-templates -> stages/terraform-stage.yml
+# Consumed cross-repo by 04-cross-repo-consumer.yml; workingDir default matches this repo's layout (kit/terraform)
 parameters:
 - name: environment
   type: string
@@ -6,7 +7,7 @@ parameters:
   type: string
 - name: workingDir
   type: string
-  default: terraform
+  default: kit/terraform
 - name: dependsOn
   type: object
   default: []

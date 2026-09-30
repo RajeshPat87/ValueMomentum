@@ -1,6 +1,6 @@
 using 'main.bicep'
 
-param rgName = 'kml_rg_main-42c127d8a76847bd'
+param rgName = 'kml_rg_main-abddc2859f2f4f15'
 param location = 'eastus'
 param deployVm = true
 param deployAks = false

@@ -1,4 +1,4 @@
-// Deploy: az deployment group create -g rg-demo -f 07-security.bicep -p vnetId=<id> peSubnetId=<id>
+// Deploy: az deployment group create -g <rg> -f 07-security.bicep -p vnetId=<id> peSubnetId=<id>
 // Key Vault mnemonic R-S-P-N: RBAC, Soft delete, Purge protection, Network deny
 
 // ========== PARAMS ==========
@@ -16,6 +16,9 @@ param uamiName string = 'id-app'
 @maxValue(90)
 param softDeleteRetentionInDays int = 90
 
+@description('Purge protection is permanent once enabled; some policies forbid it')
+param enablePurgeProtection bool = true
+
 @allowed(['Disabled', 'Enabled'])
 param publicNetworkAccess string = 'Disabled'
 
@@ -28,6 +31,9 @@ param peSubnetId string
 @secure()
 @description('Optional; stored as secret db-password when provided')
 param dbPassword string = ''
+
+@description('Set false where the deployer lacks roleAssignments/write (e.g. playground SP)')
+param deployRoleAssignment bool = true
 
 // ========== VARIABLES ==========
 var kvSecretsUser = '4633458b-17de-408a-b874-0445c86b69e6'
@@ -47,7 +53,7 @@ resource kv 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableRbacAuthorization: true
     enableSoftDelete: true
     softDeleteRetentionInDays: softDeleteRetentionInDays
-    enablePurgeProtection: true
+    enablePurgeProtection: enablePurgeProtection ? true : null // ARM rejects false; omit instead
     publicNetworkAccess: publicNetworkAccess
     networkAcls: { defaultAction: 'Deny', bypass: 'AzureServices' }
   }
@@ -60,7 +66,7 @@ resource secret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(dbPa
   properties: { value: dbPassword }
 }
 
-resource kvRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource kvRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRoleAssignment) {
   name: guid(kv.id, uami.id, kvSecretsUser)
   scope: kv
   properties: {

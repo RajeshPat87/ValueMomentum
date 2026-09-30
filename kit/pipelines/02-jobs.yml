@@ -8,13 +8,13 @@ jobs:
 - job: BicepLint
   displayName: Bicep build
   steps:
-  - script: az bicep build -f bicep/main.bicep
+  - script: az bicep build -f kit/bicep/main.bicep
 
 - job: TerraformLint
   displayName: Terraform fmt/validate
   steps:
   - script: |
-      cd terraform
+      cd kit/terraform
       terraform fmt -check -recursive
       terraform init -backend=false
       terraform validate
@@ -39,8 +39,8 @@ jobs:
   - task: CopyFiles@2
     inputs:
       Contents: |
-        bicep/**
-        terraform/**
+        kit/bicep/**
+        kit/terraform/**
       TargetFolder: $(Build.ArtifactStagingDirectory)
   - publish: $(Build.ArtifactStagingDirectory)
     artifact: iac

@@ -1,4 +1,5 @@
 # Hierarchy S-J-S: Stages -> Jobs -> Steps
+# Teaching skeleton (sub scope). The working Bicep pipeline for this kit is 06-bicep-deploy.yml
 trigger:
   branches:
     include: [main]
@@ -15,8 +16,8 @@ stages:
     pool:
       vmImage: ubuntu-latest
     steps:
-    - script: az bicep build -f bicep/main.bicep
-    - publish: $(System.DefaultWorkingDirectory)/bicep
+    - script: az bicep build -f kit/bicep/main.bicep
+    - publish: $(System.DefaultWorkingDirectory)/kit/bicep
       artifact: bicep
 
 - stage: Dev

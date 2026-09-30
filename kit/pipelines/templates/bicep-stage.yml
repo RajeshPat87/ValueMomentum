@@ -1,21 +1,83 @@
-# Lives in repo: Platform/pipeline-templates  -> stages/bicep-stage.yml
+# Bicep deploy stage for kit/bicep: Gate 2 validate -> Gate 3 what-if -> Gate 4 create (behind environment approval)
+# Used locally by 06-bicep-deploy.yml; the same file can be published to Platform/pipeline-templates -> stages/bicep-stage.yml
+# Expects a Build stage that published the kit/bicep folder as pipeline artifact `artifactName` (Gate 1 runs there).
+#
+#   scope: resourceGroup -> main-rg.bicep + main-rg.bicepparam into an EXISTING RG  (bicep README Option B, RG-scoped SPN)
+#   scope: subscription  -> main.bicep    + main.bicepparam, creates the RG too      (bicep README Option C, needs sub rights)
+#
+# Variable group (one per environment) must hold:
+#   RG              target resource group (resourceGroup scope only)
+#   SSH_PUBLIC_KEY  read by readEnvironmentVariable() in the .bicepparam
+#   DB_PASSWORD     mark as secret; secrets reach scripts only when mapped through `env:` (done below)
 parameters:
 - name: environment
   type: string
 - name: serviceConnection
   type: string
-- name: location
+- name: variableGroup
+  type: string
+- name: scope
+  type: string
+  default: resourceGroup
+  values: [resourceGroup, subscription]
+- name: location                     # subscription scope only: where the deployment record lives
   type: string
   default: eastus
+- name: paramOverrides               # extra `-p name=value` pairs, e.g. 'deployVm=false deployAks=true'
+  type: string
+  default: ''
+- name: artifactName
+  type: string
+  default: bicep
 - name: dependsOn
   type: object
-  default: []
+  default: [Build]
 
 stages:
 - stage: bicep_${{ parameters.environment }}
+  displayName: Bicep ${{ parameters.environment }}
   dependsOn: ${{ parameters.dependsOn }}
+  variables:
+  - group: ${{ parameters.variableGroup }}
   jobs:
+  # ---------- Gate 2 + 3: no approval needed, nothing is created ----------
+  - job: preflight
+    displayName: Validate + what-if
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: none
+    - download: current
+      artifact: ${{ parameters.artifactName }}
+    - task: AzureCLI@2
+      displayName: Gate 2 validate, Gate 3 what-if
+      env:
+        SCOPE: ${{ parameters.scope }}
+        LOCATION: ${{ parameters.location }}
+        RG: $(RG)
+        SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
+        DB_PASSWORD: $(DB_PASSWORD)
+      inputs:
+        azureSubscription: ${{ parameters.serviceConnection }}
+        scriptType: bash
+        scriptLocation: inlineScript
+        workingDirectory: $(Pipeline.Workspace)/${{ parameters.artifactName }}
+        inlineScript: |
+          set -euo pipefail
+          if [ "$SCOPE" = resourceGroup ]; then
+            at=(group -g "$RG"); pf=main-rg.bicepparam; name=main-rg
+          else
+            at=(sub -l "$LOCATION"); pf=main.bicepparam; name=main
+          fi
+          az bicep build-params -f "$pf" --stdout >/dev/null   # BCP427 here = variable missing from the group
+          az deployment "${at[@]}" validate -n "$name" -p "$pf" ${{ parameters.paramOverrides }} -o none
+          az deployment "${at[@]}" what-if  -n "$name" -p "$pf" ${{ parameters.paramOverrides }}
+
+  # ---------- Gate 4: approvals & checks are configured on the environment ----------
   - deployment: deploy
+    displayName: Deploy
+    dependsOn: preflight
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))   # PRs stop at what-if
     environment: ${{ parameters.environment }}
     pool:
       vmImage: ubuntu-latest
@@ -23,12 +85,31 @@ stages:
       runOnce:
         deploy:
           steps:
-          - checkout: self                 # 'self' = the CALLING repo; deployment jobs don't auto-checkout
+          - download: current          # deployment jobs don't auto-checkout; deploy the exact files Gate 1 built
+            artifact: ${{ parameters.artifactName }}
           - task: AzureCLI@2
+            displayName: Gate 4 create
+            name: deployStep
+            env:
+              SCOPE: ${{ parameters.scope }}
+              LOCATION: ${{ parameters.location }}
+              RG: $(RG)
+              SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
+              DB_PASSWORD: $(DB_PASSWORD)
             inputs:
               azureSubscription: ${{ parameters.serviceConnection }}
               scriptType: bash
               scriptLocation: inlineScript
+              workingDirectory: $(Pipeline.Workspace)/${{ parameters.artifactName }}
               inlineScript: |
-                az deployment sub create -l ${{ parameters.location }} \
-                  -f bicep/main.bicep -p bicep/main.bicepparam
+                set -euo pipefail
+                if [ "$SCOPE" = resourceGroup ]; then
+                  at=(group -g "$RG"); show=(group -g "$RG"); pf=main-rg.bicepparam; name=main-rg
+                else
+                  at=(sub -l "$LOCATION"); show=(sub); pf=main.bicepparam; name=main
+                fi
+                # -n matches the README runs, so cleanup.sh finds these resources by deployment name
+                az deployment "${at[@]}" create -n "$name" -p "$pf" ${{ parameters.paramOverrides }} -o none
+                kv=$(az deployment "${show[@]}" show -n "$name" --query properties.outputs.kvName.value -o tsv)
+                echo "Key Vault: $kv"
+                echo "##vso[task.setvariable variable=kvName;isOutput=true]$kv"

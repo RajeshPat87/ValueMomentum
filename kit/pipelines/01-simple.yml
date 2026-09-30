@@ -19,7 +19,7 @@ variables:
 steps:
 - checkout: self
 
-- script: az bicep build -f bicep/main.bicep
+- script: az bicep build -f kit/bicep/main.bicep
   displayName: Bicep lint/build
 
 - task: AzureCLI@2
@@ -30,4 +30,4 @@ steps:
     scriptLocation: inlineScript
     inlineScript: |
       az deployment sub create -l $(location) \
-        -f bicep/modules/01-rg.bicep -p rgName=$(rgName)
+        -f kit/bicep/modules/01-rg.bicep -p rgName=$(rgName)
