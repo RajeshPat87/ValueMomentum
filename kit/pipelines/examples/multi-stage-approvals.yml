@@ -1,5 +1,5 @@
 # Hierarchy S-J-S: Stages -> Jobs -> Steps
-# Teaching skeleton (sub scope). The working Bicep pipeline for this kit is 06-bicep-deploy.yml
+# Teaching skeleton (sub scope). The real pipeline for this kit is ../azure-pipelines.yml
 trigger:
   branches:
     include: [main]

@@ -21,19 +21,18 @@ resources:
 trigger: none
 
 stages:
-- template: stages/terraform-stage.yml@templates
+- template: templates/terraform-deploy.yml@templates   # ../templates/terraform-deploy.yml, published to a shared repo
   parameters:
     environment: dev
-    serviceConnection: sc-azure-dev
+    dependsOn: []
 
-- template: stages/terraform-stage.yml@templates
+- template: templates/terraform-deploy.yml@templates
   parameters:
     environment: prod
-    serviceConnection: sc-azure-prod
-    dependsOn: [tf_dev]
+    dependsOn: [terraform_dev]
 
 - stage: UseUpstream
-  dependsOn: []                             # runs in parallel with tf_dev
+  dependsOn: []                             # runs in parallel with terraform_dev
   jobs:
   - job: fetch
     pool:

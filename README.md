@@ -10,7 +10,7 @@ built four ways, so each approach can be compared side by side:
 | `kit/arm-built/` | ARM JSON compiled from the Bicep modules (`az bicep build`) |
 | `kit/bicep/` | Bicep — `main.bicep` orchestrator + numbered `modules/` |
 | `kit/terraform/` | Terraform (azurerm) equivalents |
-| `kit/pipelines/` | Azure DevOps pipelines deploying the Bicep / Terraform stages |
+| `kit/pipelines/` | Azure DevOps: one `azure-pipelines.yml` (choose Bicep or Terraform) + templates |
 
 See [`kit/README.md`](kit/README.md) for the full walkthrough and
 [`kit/bicep/README.md`](kit/bicep/README.md) for login and deploy commands.

@@ -117,11 +117,11 @@ Repeat any file you missed on day +1, +3 and +7.
 ## 2. Kit layout
 
 ```
-bicep/     main.bicep, main.bicepparam, modules/01-rg … 07-security
+bicep/     main.bicep, main-rg.bicep (+ .bicepparam), deploy.sh, modules/01-rg … 07-security
 arm/       rg, storage(+params), network, vm(+KV-reference params), rbac, keyvault
 cli/       01-direct-create.sh, 02-deploy-templates.sh
 terraform/ providers, variables, main, network, compute, security, rbac, outputs, tfvars, commands
-pipelines/ 01-simple, 02-jobs, 03-stages, 04-cross-repo-consumer, 04b-extends, 05-dependencies, 06-bicep-deploy, templates/
+pipelines/ azure-pipelines.yml, templates/ (bicep|terraform)-(validate|deploy), examples/
 ```
 
 ---
@@ -1553,9 +1553,406 @@ terraform workspace new prod && terraform workspace select prod
 
 ## 7. Azure DevOps YAML pipelines
 
+One pipeline, two templates per tool. Queue `azure-pipelines.yml`, pick **bicep** or **terraform**, and (for Bicep) the main file or a single module.
+
+```
+pipelines/
+├── azure-pipelines.yml          entry point: parameters tool + bicepTarget
+├── templates/
+│   ├── bicep-validate.yml       Gate 1: build + lint, publish artifact
+│   ├── bicep-deploy.yml         per env: validate + what-if -> approval -> create  (calls bicep/deploy.sh)
+│   ├── terraform-validate.yml   Gate 1: fmt + validate, no backend
+│   └── terraform-deploy.yml     per env: plan -> approval -> apply saved plan
+└── examples/                    syntax reference only, not wired to anything
+```
+
+| | Bicep | Terraform |
+|---|---|---|
+| Validate (no Azure) | `bicep-validate.yml` | `terraform-validate.yml` |
+| Preview | `deploy.sh validate` + `what-if` | `terraform plan -detailed-exitcode` |
+| Approval | ADO environment `<env>` | ADO environment `<env>` |
+| Deploy | `deploy.sh create <target>` | `terraform apply tfplan` |
+| Per env | `sc-azure-<env>`, `vg-iac-<env>` | `sc-azure-<env>`, `vg-iac-<env>`, state key `<env>.tfstate` |
+
 Output-variable lookup: same stage `dependencies.<Job>.outputs['<step>.<var>']` · other stage `stageDependencies.<Stage>.<Job>.outputs['<step>.<var>']` · stage condition `dependencies.<Stage>.outputs['<Job>.<step>.<var>']` · deployment jobs repeat the job name: `outputs['<DeployJob>.<step>.<var>']`.
 
-### `pipelines/01-simple.yml`
+### `pipelines/azure-pipelines.yml`
+
+```yaml
+# The ONE pipeline for this kit. Pick a tool when you queue a run; each side is validate -> dev -> prod.
+#
+#   tool: bicep      bicep-validate.yml    -> bicep-deploy.yml     (dev, prod)   calls kit/bicep/deploy.sh <action> <target>
+#   tool: terraform  terraform-validate.yml -> terraform-deploy.yml (dev, prod)   plan -> approval -> apply
+#
+# Prod runs only from main. PRs stop at what-if / plan.
+# One-time ADO setup per environment <env> in (dev, prod):
+#   service connection sc-azure-<env>  (ARM, workload identity federation)
+#   variable group     vg-iac-<env>    RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret), EXTRA_PARAMS (optional, Bicep)
+#   environment        <env>           add approvals on prod
+parameters:
+- name: tool
+  displayName: IaC tool
+  type: string
+  default: bicep
+  values: [bicep, terraform]
+- name: bicepTarget
+  displayName: Bicep target (main files or a single module)
+  type: string
+  default: main-rg
+  values:
+  - main-rg        # all modules into the existing RG (RG-scoped SPN)
+  - main           # creates the RG too (needs subscription rights)
+  - storage
+  - network
+  - vm             # needs network
+  - aks            # needs network
+  - security       # needs network
+  - rbac           # needs security + storage
+  - mini
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [kit/bicep/*, kit/pipelines/*]   # CI uses the defaults: bicep / main-rg
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [kit/bicep/*, kit/pipelines/*]      # queue terraform runs manually (tool: terraform)
+
+stages:
+- ${{ if eq(parameters.tool, 'bicep') }}:
+  - template: templates/bicep-validate.yml
+  - template: templates/bicep-deploy.yml
+    parameters:
+      environment: dev
+      target: ${{ parameters.bicepTarget }}
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+    - template: templates/bicep-deploy.yml
+      parameters:
+        environment: prod
+        target: ${{ parameters.bicepTarget }}
+        dependsOn: [bicep_dev]
+
+- ${{ if eq(parameters.tool, 'terraform') }}:
+  - template: templates/terraform-validate.yml
+  - template: templates/terraform-deploy.yml
+    parameters:
+      environment: dev
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+    - template: templates/terraform-deploy.yml
+      parameters:
+        environment: prod
+        dependsOn: [terraform_dev]
+```
+
+### `pipelines/templates/bicep-validate.yml`
+
+```yaml
+# Bicep Gate 1: compile + lint every file (no Azure call), then publish kit/bicep as artifact `bicep`
+# so every environment deploys exactly the files that passed here.
+stages:
+- stage: bicep_validate
+  displayName: Bicep validate
+  jobs:
+  - job: build
+    displayName: Build + lint
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+    - bash: |
+        set -euo pipefail
+        az bicep install                  # no-op when the agent already has it
+        for f in modules/*.bicep main.bicep main-rg.bicep; do
+          az bicep build -f "$f" --stdout >/dev/null && echo "OK  $f"
+        done
+        az bicep lint -f main.bicep
+        az bicep lint -f main-rg.bicep
+      displayName: Gate 1 build + lint
+      workingDirectory: kit/bicep
+    - task: CopyFiles@2
+      displayName: Stage deployable files
+      inputs:
+        SourceFolder: kit/bicep
+        Contents: |
+          *.bicep
+          *.bicepparam
+          deploy.sh
+          modules/*.bicep
+        TargetFolder: $(Build.ArtifactStagingDirectory)/bicep
+    - publish: $(Build.ArtifactStagingDirectory)/bicep
+      artifact: bicep
+```
+
+### `pipelines/templates/bicep-deploy.yml`
+
+```yaml
+# Bicep deploy for one environment: Gate 2 validate + Gate 3 what-if -> approval -> Gate 4 create
+# Every step calls kit/bicep/deploy.sh, the same script you run locally, so pipeline and laptop behave the same.
+#
+# Per-environment names follow one convention:
+#   service connection sc-azure-<env> | variable group vg-iac-<env> | ADO environment <env>
+# Variable group holds: RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret), EXTRA_PARAMS (optional, e.g. deployVm=false)
+parameters:
+- name: environment
+  type: string
+- name: target                       # main-rg | main | storage | network | vm | aks | security | rbac | mini
+  type: string
+- name: dependsOn
+  type: object
+  default: [bicep_validate]
+
+stages:
+- stage: bicep_${{ parameters.environment }}
+  displayName: Bicep ${{ parameters.environment }} (${{ parameters.target }})
+  dependsOn: ${{ parameters.dependsOn }}
+  variables:
+  - name: EXTRA_PARAMS               # default; the variable group overrides it when set
+    value: ''
+  - group: vg-iac-${{ parameters.environment }}
+  jobs:
+  - job: preview
+    displayName: Validate + what-if
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: none
+    - download: current
+      artifact: bicep
+    - task: AzureCLI@2
+      displayName: deploy.sh validate + what-if
+      env:                           # secrets reach scripts only through env:
+        RG: $(RG)
+        SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
+        DB_PASSWORD: $(DB_PASSWORD)
+        EXTRA_PARAMS: $(EXTRA_PARAMS)
+      inputs:
+        azureSubscription: sc-azure-${{ parameters.environment }}
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          sh=$(Pipeline.Workspace)/bicep/deploy.sh; chmod +x "$sh"
+          "$sh" validate ${{ parameters.target }}
+          "$sh" what-if  ${{ parameters.target }}
+
+  - deployment: deploy
+    displayName: Deploy
+    dependsOn: preview
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))   # PRs stop at what-if
+    environment: ${{ parameters.environment }}                                   # approvals live here
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: bicep
+          - task: AzureCLI@2
+            displayName: deploy.sh create
+            env:
+              RG: $(RG)
+              SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
+              DB_PASSWORD: $(DB_PASSWORD)
+              EXTRA_PARAMS: $(EXTRA_PARAMS)
+            inputs:
+              azureSubscription: sc-azure-${{ parameters.environment }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                sh=$(Pipeline.Workspace)/bicep/deploy.sh; chmod +x "$sh"
+                "$sh" create ${{ parameters.target }}
+```
+
+### `pipelines/templates/terraform-validate.yml`
+
+```yaml
+# Terraform Gate 1: fmt + validate with no backend and no Azure call (mirror of bicep-validate.yml)
+stages:
+- stage: terraform_validate
+  displayName: Terraform validate
+  jobs:
+  - job: validate
+    displayName: fmt + validate
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+    - bash: |
+        set -euo pipefail
+        terraform version
+        terraform fmt -check -recursive
+        terraform init -backend=false -input=false
+        terraform validate
+      displayName: Gate 1 fmt + validate
+      workingDirectory: kit/terraform
+```
+
+### `pipelines/templates/terraform-deploy.yml`
+
+```yaml
+# Terraform deploy for one environment: plan -> approval -> apply the SAME saved plan (mirror of bicep-deploy.yml)
+# Same naming convention as Bicep: sc-azure-<env> | vg-iac-<env> | ADO environment <env>
+# Variable group holds: SSH_PUBLIC_KEY, DB_PASSWORD (secret). terraform.tfvars is git-ignored, so inputs come in as TF_VAR_*.
+# State: backend in providers.tf, one key per environment (<env>.tfstate). Apply is skipped when the plan has no changes.
+parameters:
+- name: environment
+  type: string
+- name: dependsOn
+  type: object
+  default: [terraform_validate]
+
+stages:
+- stage: terraform_${{ parameters.environment }}
+  displayName: Terraform ${{ parameters.environment }}
+  dependsOn: ${{ parameters.dependsOn }}
+  variables:
+  - group: vg-iac-${{ parameters.environment }}
+  jobs:
+  - job: plan
+    displayName: Plan
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+    - task: AzureCLI@2
+      name: planStep
+      displayName: terraform plan
+      env:
+        TF_VAR_env: ${{ parameters.environment }}
+        TF_VAR_ssh_public_key: $(SSH_PUBLIC_KEY)
+        TF_VAR_db_password: $(DB_PASSWORD)
+      inputs:
+        azureSubscription: sc-azure-${{ parameters.environment }}
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true          # exposes servicePrincipalId / tenantId / idToken for OIDC
+        workingDirectory: kit/terraform
+        inlineScript: |
+          set -euo pipefail
+          export ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId ARM_OIDC_TOKEN=$idToken ARM_USE_OIDC=true
+          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv) TF_VAR_subscription_id=$(az account show --query id -o tsv)
+          terraform init -input=false -backend-config="key=${{ parameters.environment }}.tfstate"
+          rc=0; terraform plan -input=false -detailed-exitcode -out=tfplan || rc=$?   # 0 none, 1 error, 2 changes
+          [ "$rc" -eq 1 ] && exit 1
+          echo "##vso[task.setvariable variable=hasChanges;isOutput=true]$([ "$rc" -eq 2 ] && echo true || echo false)"
+          mkdir -p "$(Build.ArtifactStagingDirectory)/tfplan"
+          cp tfplan .terraform.lock.hcl "$(Build.ArtifactStagingDirectory)/tfplan/"   # apply must use the same provider versions
+    - publish: $(Build.ArtifactStagingDirectory)/tfplan
+      artifact: tfplan_${{ parameters.environment }}
+
+  - deployment: apply
+    displayName: Apply
+    dependsOn: plan
+    condition: >-
+      and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'),
+          eq(dependencies.plan.outputs['planStep.hasChanges'], 'true'))
+    environment: ${{ parameters.environment }}
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self                 # deployment jobs don't auto-checkout
+          - download: current
+            artifact: tfplan_${{ parameters.environment }}
+          - task: AzureCLI@2
+            displayName: terraform apply
+            inputs:
+              azureSubscription: sc-azure-${{ parameters.environment }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              workingDirectory: kit/terraform
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId ARM_OIDC_TOKEN=$idToken ARM_USE_OIDC=true
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                cp $(Pipeline.Workspace)/tfplan_${{ parameters.environment }}/.terraform.lock.hcl .
+                terraform init -input=false -backend-config="key=${{ parameters.environment }}.tfstate"
+                terraform apply -input=false $(Pipeline.Workspace)/tfplan_${{ parameters.environment }}/tfplan
+```
+
+### `bicep/deploy.sh`
+
+Called by `bicep-deploy.yml`; run it locally the same way: `./deploy.sh what-if network`.
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh <action> <target> — one entry point for local runs AND the pipeline (kit/pipelines/templates/bicep-deploy.yml)
+#
+#   action : validate | what-if | create
+#   target : main-rg   all modules into an existing RG   (main-rg.bicepparam)
+#            main      RG + all modules, subscription scope (main.bicepparam)
+#            storage | network | vm | aks | security | rbac | mini   one module (README Option A)
+#
+# Env: RG (every target except main), LOCATION (main only, default eastus),
+#      SSH_PUBLIC_KEY, DB_PASSWORD (source ./modules/set-secrets.sh locally),
+#      EXTRA_PARAMS (optional "name=value name=value" overrides)
+#
+# Single modules read their inputs from earlier deployments (vm needs network, rbac needs security + storage).
+# The deployment name is the target, so cleanup.sh can find everything this script created.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+usage() { sed -n '2,9p' "$0" >&2; exit 2; }
+action=${1:-}; target=${2:-}
+case "$action" in validate|what-if|create) ;; *) usage ;; esac
+
+# output <deployment> <name>: read an output from an earlier deployment in $RG
+output() {
+  az deployment group show -g "$RG" -n "$1" --query "properties.outputs.$2.value" -o tsv 2>/dev/null |
+    grep . || { echo "ERROR: no output '$2' from deployment '$1' in $RG. Deploy target '$1' first." >&2; exit 1; }
+}
+
+module=''; params=()
+case "$target" in
+  main-rg)  src=(-p main-rg.bicepparam) ;;
+  main)     src=(-p main.bicepparam) ;;
+  storage)  module=02-storage ;;
+  network)  module=03-network ;;
+  vm)       module=04-vm;       params=(subnetId="$(output network webSubnetId)" sshPublicKey="${SSH_PUBLIC_KEY:?}") ;;
+  aks)      module=05-aks;      params=(subnetId="$(output network aksSubnetId)") ;;
+  security) module=07-security; params=(vnetId="$(output network vnetId)" peSubnetId="$(output network peSubnetId)"
+                                        dbPassword="${DB_PASSWORD:-}") ;;
+  rbac)     module=06-rbac;     params=(principalId="$(output security uamiPrincipalId)" stgName="$(output storage stgName)") ;;
+  mini)     module=mini;        params=(sshPublicKey="${SSH_PUBLIC_KEY:?}") ;;
+  *)        usage ;;
+esac
+
+if [ "$target" = main ]; then
+  at=(sub -l "${LOCATION:-eastus}"); show=(sub)
+else
+  : "${RG:?export RG=<resource group> first}"
+  at=(group -g "$RG"); show=(group -g "$RG")
+fi
+[ -n "$module" ] && src=(-f "modules/$module.bicep")
+
+args=("${src[@]}")
+[ ${#params[@]} -gt 0 ] && args+=(-p "${params[@]}")
+read -ra extra <<< "${EXTRA_PARAMS:-}"
+[ ${#extra[@]} -gt 0 ] && args+=(-p "${extra[@]}")
+
+echo "==> az deployment ${at[0]} $action  target=$target"
+case "$action" in
+  validate) az deployment "${at[@]}" validate -n "$target" "${args[@]}" -o none && echo "valid" ;;
+  what-if)  az deployment "${at[@]}" what-if  -n "$target" "${args[@]}" ;;
+  create)   az deployment "${at[@]}" create   -n "$target" "${args[@]}" -o none
+            az deployment "${show[@]}" show -n "$target" --query properties.outputs -o json ;;
+esac
+```
+
+### Examples (syntax reference)
+
+Stand-alone snippets for interview questions on pipeline syntax. They are not part of the real pipeline.
+
+### `pipelines/examples/single-job.yml`
 
 ```yaml
 # Root mnemonic T-R-V-P-S: Trigger, Resources, Variables, Pool, Stages/Jobs/Steps
@@ -1593,7 +1990,7 @@ steps:
         -f kit/bicep/modules/01-rg.bicep -p rgName=$(rgName)
 ```
 
-### `pipelines/02-jobs.yml`
+### `pipelines/examples/parallel-jobs-matrix.yml`
 
 ```yaml
 # Jobs run in PARALLEL unless dependsOn is set
@@ -1644,11 +2041,11 @@ jobs:
     artifact: iac
 ```
 
-### `pipelines/03-stages.yml`
+### `pipelines/examples/multi-stage-approvals.yml`
 
 ```yaml
 # Hierarchy S-J-S: Stages -> Jobs -> Steps
-# Teaching skeleton (sub scope). The working Bicep pipeline for this kit is 06-bicep-deploy.yml
+# Teaching skeleton (sub scope). The real pipeline for this kit is ../azure-pipelines.yml
 trigger:
   branches:
     include: [main]
@@ -1720,201 +2117,7 @@ stages:
                   -p $(Pipeline.Workspace)/bicep/main.bicepparam
 ```
 
-### `pipelines/templates/bicep-stage.yml`
-
-```yaml
-# Bicep deploy stage for kit/bicep: Gate 2 validate -> Gate 3 what-if -> Gate 4 create (behind environment approval)
-# Used locally by 06-bicep-deploy.yml; the same file can be published to Platform/pipeline-templates -> stages/bicep-stage.yml
-# Expects a Build stage that published the kit/bicep folder as pipeline artifact `artifactName` (Gate 1 runs there).
-#
-#   scope: resourceGroup -> main-rg.bicep + main-rg.bicepparam into an EXISTING RG  (bicep README Option B, RG-scoped SPN)
-#   scope: subscription  -> main.bicep    + main.bicepparam, creates the RG too      (bicep README Option C, needs sub rights)
-#
-# Variable group (one per environment) must hold:
-#   RG              target resource group (resourceGroup scope only)
-#   SSH_PUBLIC_KEY  read by readEnvironmentVariable() in the .bicepparam
-#   DB_PASSWORD     mark as secret; secrets reach scripts only when mapped through `env:` (done below)
-parameters:
-- name: environment
-  type: string
-- name: serviceConnection
-  type: string
-- name: variableGroup
-  type: string
-- name: scope
-  type: string
-  default: resourceGroup
-  values: [resourceGroup, subscription]
-- name: location                     # subscription scope only: where the deployment record lives
-  type: string
-  default: eastus
-- name: paramOverrides               # extra `-p name=value` pairs, e.g. 'deployVm=false deployAks=true'
-  type: string
-  default: ''
-- name: artifactName
-  type: string
-  default: bicep
-- name: dependsOn
-  type: object
-  default: [Build]
-
-stages:
-- stage: bicep_${{ parameters.environment }}
-  displayName: Bicep ${{ parameters.environment }}
-  dependsOn: ${{ parameters.dependsOn }}
-  variables:
-  - group: ${{ parameters.variableGroup }}
-  jobs:
-  # ---------- Gate 2 + 3: no approval needed, nothing is created ----------
-  - job: preflight
-    displayName: Validate + what-if
-    pool:
-      vmImage: ubuntu-latest
-    steps:
-    - checkout: none
-    - download: current
-      artifact: ${{ parameters.artifactName }}
-    - task: AzureCLI@2
-      displayName: Gate 2 validate, Gate 3 what-if
-      env:
-        SCOPE: ${{ parameters.scope }}
-        LOCATION: ${{ parameters.location }}
-        RG: $(RG)
-        SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
-        DB_PASSWORD: $(DB_PASSWORD)
-      inputs:
-        azureSubscription: ${{ parameters.serviceConnection }}
-        scriptType: bash
-        scriptLocation: inlineScript
-        workingDirectory: $(Pipeline.Workspace)/${{ parameters.artifactName }}
-        inlineScript: |
-          set -euo pipefail
-          if [ "$SCOPE" = resourceGroup ]; then
-            at=(group -g "$RG"); pf=main-rg.bicepparam; name=main-rg
-          else
-            at=(sub -l "$LOCATION"); pf=main.bicepparam; name=main
-          fi
-          az bicep build-params -f "$pf" --stdout >/dev/null   # BCP427 here = variable missing from the group
-          az deployment "${at[@]}" validate -n "$name" -p "$pf" ${{ parameters.paramOverrides }} -o none
-          az deployment "${at[@]}" what-if  -n "$name" -p "$pf" ${{ parameters.paramOverrides }}
-
-  # ---------- Gate 4: approvals & checks are configured on the environment ----------
-  - deployment: deploy
-    displayName: Deploy
-    dependsOn: preflight
-    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))   # PRs stop at what-if
-    environment: ${{ parameters.environment }}
-    pool:
-      vmImage: ubuntu-latest
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - download: current          # deployment jobs don't auto-checkout; deploy the exact files Gate 1 built
-            artifact: ${{ parameters.artifactName }}
-          - task: AzureCLI@2
-            displayName: Gate 4 create
-            name: deployStep
-            env:
-              SCOPE: ${{ parameters.scope }}
-              LOCATION: ${{ parameters.location }}
-              RG: $(RG)
-              SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
-              DB_PASSWORD: $(DB_PASSWORD)
-            inputs:
-              azureSubscription: ${{ parameters.serviceConnection }}
-              scriptType: bash
-              scriptLocation: inlineScript
-              workingDirectory: $(Pipeline.Workspace)/${{ parameters.artifactName }}
-              inlineScript: |
-                set -euo pipefail
-                if [ "$SCOPE" = resourceGroup ]; then
-                  at=(group -g "$RG"); show=(group -g "$RG"); pf=main-rg.bicepparam; name=main-rg
-                else
-                  at=(sub -l "$LOCATION"); show=(sub); pf=main.bicepparam; name=main
-                fi
-                # -n matches the README runs, so cleanup.sh finds these resources by deployment name
-                az deployment "${at[@]}" create -n "$name" -p "$pf" ${{ parameters.paramOverrides }} -o none
-                kv=$(az deployment "${show[@]}" show -n "$name" --query properties.outputs.kvName.value -o tsv)
-                echo "Key Vault: $kv"
-                echo "##vso[task.setvariable variable=kvName;isOutput=true]$kv"
-```
-
-### `pipelines/templates/terraform-stage.yml`
-
-```yaml
-# Lives in repo: Platform/pipeline-templates -> stages/terraform-stage.yml
-# Consumed cross-repo by 04-cross-repo-consumer.yml; workingDir default matches this repo's layout (kit/terraform)
-parameters:
-- name: environment
-  type: string
-- name: serviceConnection
-  type: string
-- name: workingDir
-  type: string
-  default: kit/terraform
-- name: dependsOn
-  type: object
-  default: []
-
-stages:
-- stage: tf_${{ parameters.environment }}
-  dependsOn: ${{ parameters.dependsOn }}
-  jobs:
-  - job: plan
-    pool:
-      vmImage: ubuntu-latest
-    steps:
-    - task: AzureCLI@2
-      name: planStep
-      inputs:
-        azureSubscription: ${{ parameters.serviceConnection }}
-        scriptType: bash
-        scriptLocation: inlineScript
-        addSpnToEnvironment: true
-        workingDirectory: ${{ parameters.workingDir }}
-        inlineScript: |
-          export ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId
-          export ARM_OIDC_TOKEN=$idToken ARM_USE_OIDC=true
-          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-          terraform init -input=false -backend-config="key=${{ parameters.environment }}.tfstate"
-          rc=0
-          terraform plan -input=false -detailed-exitcode -out=tfplan || rc=$?
-          [ "$rc" -eq 1 ] && exit 1
-          changed=false; [ "$rc" -eq 2 ] && changed=true
-          echo "##vso[task.setvariable variable=hasChanges;isOutput=true]$changed"
-    - publish: ${{ parameters.workingDir }}/tfplan
-      artifact: tfplan_${{ parameters.environment }}
-
-  - deployment: apply
-    dependsOn: plan
-    condition: and(succeeded(), eq(dependencies.plan.outputs['planStep.hasChanges'], 'true'))
-    environment: ${{ parameters.environment }}     # approval gate
-    pool:
-      vmImage: ubuntu-latest
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - checkout: self
-          - download: current
-            artifact: tfplan_${{ parameters.environment }}
-          - task: AzureCLI@2
-            inputs:
-              azureSubscription: ${{ parameters.serviceConnection }}
-              scriptType: bash
-              scriptLocation: inlineScript
-              addSpnToEnvironment: true
-              workingDirectory: ${{ parameters.workingDir }}
-              inlineScript: |
-                export ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId
-                export ARM_OIDC_TOKEN=$idToken ARM_USE_OIDC=true
-                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-                terraform init -input=false -backend-config="key=${{ parameters.environment }}.tfstate"
-                terraform apply -input=false $(Pipeline.Workspace)/tfplan_${{ parameters.environment }}/tfplan
-```
-
-### `pipelines/04-cross-repo-consumer.yml`
+### `pipelines/examples/cross-repo-templates.yml`
 
 ```yaml
 # App/infra repo pipeline that CALLS templates from another repo and is TRIGGERED by another pipeline
@@ -1940,19 +2143,18 @@ resources:
 trigger: none
 
 stages:
-- template: stages/terraform-stage.yml@templates
+- template: templates/terraform-deploy.yml@templates   # ../templates/terraform-deploy.yml, published to a shared repo
   parameters:
     environment: dev
-    serviceConnection: sc-azure-dev
+    dependsOn: []
 
-- template: stages/terraform-stage.yml@templates
+- template: templates/terraform-deploy.yml@templates
   parameters:
     environment: prod
-    serviceConnection: sc-azure-prod
-    dependsOn: [tf_dev]
+    dependsOn: [terraform_dev]
 
 - stage: UseUpstream
-  dependsOn: []                             # runs in parallel with tf_dev
+  dependsOn: []                             # runs in parallel with terraform_dev
   jobs:
   - job: fetch
     pool:
@@ -1964,7 +2166,7 @@ stages:
     - script: echo "Upstream run $(resources.pipeline.upstream.runID)"
 ```
 
-### `pipelines/04b-extends-governance.yml`
+### `pipelines/examples/extends-governance.yml`
 
 ```yaml
 # Enforced template: pair with a "Required template" check on the environment / service connection
@@ -1985,7 +2187,7 @@ extends:
         - script: echo build
 ```
 
-### `pipelines/05-dependencies.yml`
+### `pipelines/examples/dependencies-and-outputs.yml`
 
 ```yaml
 # Stage deps, job deps, step deps, output variables, fan-out/fan-in
@@ -2060,85 +2262,4 @@ stages:
   - job: d
     steps:
     - script: echo docs
-```
-
-### `pipelines/06-bicep-deploy.yml`
-
-The working pipeline for `kit/bicep`: Gate 1 in Build, then `templates/bicep-stage.yml` per environment (validate → what-if → approval → create).
-
-```yaml
-# End-to-end Bicep pipeline for kit/bicep — the 4 gates from kit/bicep/README.md section 3
-#   Build (Gate 1, no Azure) -> dev (Gate 2+3, approval, Gate 4) -> prod (same, main only)
-# PRs run Build + dev what-if only; the deploy jobs skip on Build.Reason == PullRequest.
-#
-# One-time setup in Azure DevOps:
-#   Service connections : sc-azure-dev, sc-azure-prod (ARM, workload identity federation; RG Contributor is enough)
-#   Variable groups     : vg-bicep-dev, vg-bicep-prod -> RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret)
-#   Environments        : dev, prod (add approvals on prod)
-trigger:
-  branches:
-    include: [main]
-  paths:
-    include:
-    - kit/bicep/*
-    - kit/pipelines/06-bicep-deploy.yml
-    - kit/pipelines/templates/bicep-stage.yml
-
-pr:
-  branches:
-    include: [main]
-  paths:
-    include: [kit/bicep/*]
-
-variables:
-  bicepDir: kit/bicep
-
-stages:
-# ---------- Gate 1: compile + lint every file, no Azure call ----------
-- stage: Build
-  jobs:
-  - job: Build
-    pool:
-      vmImage: ubuntu-latest
-    steps:
-    - checkout: self
-    - bash: |
-        set -euo pipefail
-        az bicep install                  # no-op when the agent already has it
-        for f in modules/*.bicep main.bicep main-rg.bicep; do
-          az bicep build -f "$f" --stdout >/dev/null && echo "OK  $f"
-        done
-        az bicep lint -f main-rg.bicep
-        az bicep lint -f main.bicep
-      displayName: Gate 1 build + lint
-      workingDirectory: $(bicepDir)
-    - task: CopyFiles@2
-      displayName: Stage deployable files
-      inputs:
-        SourceFolder: $(bicepDir)
-        Contents: |
-          *.bicep
-          *.bicepparam
-          modules/*.bicep
-        TargetFolder: $(Build.ArtifactStagingDirectory)/bicep
-    - publish: $(Build.ArtifactStagingDirectory)/bicep
-      artifact: bicep
-
-# ---------- Gates 2-4 per environment ----------
-- template: templates/bicep-stage.yml
-  parameters:
-    environment: dev
-    serviceConnection: sc-azure-dev
-    variableGroup: vg-bicep-dev
-    scope: resourceGroup                # KodeKloud / RG-scoped SPN: main-rg.bicep
-
-- ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
-  - template: templates/bicep-stage.yml
-    parameters:
-      environment: prod
-      serviceConnection: sc-azure-prod
-      variableGroup: vg-bicep-prod
-      scope: resourceGroup              # 'subscription' = main.bicep creates the RG (drop the overrides: main.bicep lacks them)
-      paramOverrides: kvPurgeProtection=true kvSoftDeleteDays=90   # prod keeps the secure defaults; purge protection is permanent
-      dependsOn: [bicep_dev]
 ```

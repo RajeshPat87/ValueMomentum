@@ -17,6 +17,7 @@ Each module is **one concern, one file**, and every module follows the same layo
 |------|-------|---------|-------------|
 | `main.bicep` + `main.bicepparam` | subscription | RG + calls all modules | `rgId`, `kvName` |
 | `main-rg.bicep` + `main-rg.bicepparam` | resource group | Calls all modules into an **existing** RG, with feature flags | `kvName`, `stgName` |
+| `deploy.sh` | shell | `./deploy.sh <validate\|what-if\|create> <main-rg\|main\|storage\|network\|vm\|aks\|security\|rbac\|mini>`, the same script the pipeline runs | — |
 | `set-secrets.sh` | shell | Exports `SSH_PUBLIC_KEY` and `DB_PASSWORD` (reuses them if set, otherwise creates them) | — |
 | `modules/01-rg.bicep` | subscription | Resource group with typed tags | `rgId`, `rgName` |
 | `modules/02-storage.bicep` | resource group | StorageV2 (TLS1.2+, HTTPS-only, no public blob) + containers | `stgName`, `stgId`, `blobEndpoint` |
@@ -505,6 +506,20 @@ The rule is **file scope = command scope**: `targetScope = 'subscription'` → `
 ```bash
 az deployment group create -g "$RG" -f modules/mini.bicep -p sshPublicKey="$SSH_PUBLIC_KEY"
 ```
+
+### Same thing, one script (and in the pipeline)
+
+`deploy.sh` wraps Options A–D. Single modules pick up their inputs from earlier deployments, the same way Option A does by hand:
+
+```bash
+source ./modules/set-secrets.sh
+./deploy.sh what-if main-rg          # Option B
+./deploy.sh create  network          # Option A, step by step
+./deploy.sh create  vm               # reads webSubnetId from the 'network' deployment
+EXTRA_PARAMS="deployVm=false" ./deploy.sh create main-rg
+```
+
+`kit/pipelines/azure-pipelines.yml` runs exactly these commands (tool `bicep`, target of your choice). See `kit/README.md` section 7.
 
 ---
 

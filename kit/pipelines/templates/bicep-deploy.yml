@@ -1,0 +1,77 @@
+# Bicep deploy for one environment: Gate 2 validate + Gate 3 what-if -> approval -> Gate 4 create
+# Every step calls kit/bicep/deploy.sh, the same script you run locally, so pipeline and laptop behave the same.
+#
+# Per-environment names follow one convention:
+#   service connection sc-azure-<env> | variable group vg-iac-<env> | ADO environment <env>
+# Variable group holds: RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret), EXTRA_PARAMS (optional, e.g. deployVm=false)
+parameters:
+- name: environment
+  type: string
+- name: target                       # main-rg | main | storage | network | vm | aks | security | rbac | mini
+  type: string
+- name: dependsOn
+  type: object
+  default: [bicep_validate]
+
+stages:
+- stage: bicep_${{ parameters.environment }}
+  displayName: Bicep ${{ parameters.environment }} (${{ parameters.target }})
+  dependsOn: ${{ parameters.dependsOn }}
+  variables:
+  - name: EXTRA_PARAMS               # default; the variable group overrides it when set
+    value: ''
+  - group: vg-iac-${{ parameters.environment }}
+  jobs:
+  - job: preview
+    displayName: Validate + what-if
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: none
+    - download: current
+      artifact: bicep
+    - task: AzureCLI@2
+      displayName: deploy.sh validate + what-if
+      env:                           # secrets reach scripts only through env:
+        RG: $(RG)
+        SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
+        DB_PASSWORD: $(DB_PASSWORD)
+        EXTRA_PARAMS: $(EXTRA_PARAMS)
+      inputs:
+        azureSubscription: sc-azure-${{ parameters.environment }}
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          sh=$(Pipeline.Workspace)/bicep/deploy.sh; chmod +x "$sh"
+          "$sh" validate ${{ parameters.target }}
+          "$sh" what-if  ${{ parameters.target }}
+
+  - deployment: deploy
+    displayName: Deploy
+    dependsOn: preview
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))   # PRs stop at what-if
+    environment: ${{ parameters.environment }}                                   # approvals live here
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: bicep
+          - task: AzureCLI@2
+            displayName: deploy.sh create
+            env:
+              RG: $(RG)
+              SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
+              DB_PASSWORD: $(DB_PASSWORD)
+              EXTRA_PARAMS: $(EXTRA_PARAMS)
+            inputs:
+              azureSubscription: sc-azure-${{ parameters.environment }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                sh=$(Pipeline.Workspace)/bicep/deploy.sh; chmod +x "$sh"
+                "$sh" create ${{ parameters.target }}

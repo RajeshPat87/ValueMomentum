@@ -1,0 +1,67 @@
+# The ONE pipeline for this kit. Pick a tool when you queue a run; each side is validate -> dev -> prod.
+#
+#   tool: bicep      bicep-validate.yml    -> bicep-deploy.yml     (dev, prod)   calls kit/bicep/deploy.sh <action> <target>
+#   tool: terraform  terraform-validate.yml -> terraform-deploy.yml (dev, prod)   plan -> approval -> apply
+#
+# Prod runs only from main. PRs stop at what-if / plan.
+# One-time ADO setup per environment <env> in (dev, prod):
+#   service connection sc-azure-<env>  (ARM, workload identity federation)
+#   variable group     vg-iac-<env>    RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret), EXTRA_PARAMS (optional, Bicep)
+#   environment        <env>           add approvals on prod
+parameters:
+- name: tool
+  displayName: IaC tool
+  type: string
+  default: bicep
+  values: [bicep, terraform]
+- name: bicepTarget
+  displayName: Bicep target (main files or a single module)
+  type: string
+  default: main-rg
+  values:
+  - main-rg        # all modules into the existing RG (RG-scoped SPN)
+  - main           # creates the RG too (needs subscription rights)
+  - storage
+  - network
+  - vm             # needs network
+  - aks            # needs network
+  - security       # needs network
+  - rbac           # needs security + storage
+  - mini
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [kit/bicep/*, kit/pipelines/*]   # CI uses the defaults: bicep / main-rg
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [kit/bicep/*, kit/pipelines/*]      # queue terraform runs manually (tool: terraform)
+
+stages:
+- ${{ if eq(parameters.tool, 'bicep') }}:
+  - template: templates/bicep-validate.yml
+  - template: templates/bicep-deploy.yml
+    parameters:
+      environment: dev
+      target: ${{ parameters.bicepTarget }}
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+    - template: templates/bicep-deploy.yml
+      parameters:
+        environment: prod
+        target: ${{ parameters.bicepTarget }}
+        dependsOn: [bicep_dev]
+
+- ${{ if eq(parameters.tool, 'terraform') }}:
+  - template: templates/terraform-validate.yml
+  - template: templates/terraform-deploy.yml
+    parameters:
+      environment: dev
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+    - template: templates/terraform-deploy.yml
+      parameters:
+        environment: prod
+        dependsOn: [terraform_dev]

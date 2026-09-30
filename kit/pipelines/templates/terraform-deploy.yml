@@ -1,0 +1,81 @@
+# Terraform deploy for one environment: plan -> approval -> apply the SAME saved plan (mirror of bicep-deploy.yml)
+# Same naming convention as Bicep: sc-azure-<env> | vg-iac-<env> | ADO environment <env>
+# Variable group holds: SSH_PUBLIC_KEY, DB_PASSWORD (secret). terraform.tfvars is git-ignored, so inputs come in as TF_VAR_*.
+# State: backend in providers.tf, one key per environment (<env>.tfstate). Apply is skipped when the plan has no changes.
+parameters:
+- name: environment
+  type: string
+- name: dependsOn
+  type: object
+  default: [terraform_validate]
+
+stages:
+- stage: terraform_${{ parameters.environment }}
+  displayName: Terraform ${{ parameters.environment }}
+  dependsOn: ${{ parameters.dependsOn }}
+  variables:
+  - group: vg-iac-${{ parameters.environment }}
+  jobs:
+  - job: plan
+    displayName: Plan
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+    - task: AzureCLI@2
+      name: planStep
+      displayName: terraform plan
+      env:
+        TF_VAR_env: ${{ parameters.environment }}
+        TF_VAR_ssh_public_key: $(SSH_PUBLIC_KEY)
+        TF_VAR_db_password: $(DB_PASSWORD)
+      inputs:
+        azureSubscription: sc-azure-${{ parameters.environment }}
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true          # exposes servicePrincipalId / tenantId / idToken for OIDC
+        workingDirectory: kit/terraform
+        inlineScript: |
+          set -euo pipefail
+          export ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId ARM_OIDC_TOKEN=$idToken ARM_USE_OIDC=true
+          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv) TF_VAR_subscription_id=$(az account show --query id -o tsv)
+          terraform init -input=false -backend-config="key=${{ parameters.environment }}.tfstate"
+          rc=0; terraform plan -input=false -detailed-exitcode -out=tfplan || rc=$?   # 0 none, 1 error, 2 changes
+          [ "$rc" -eq 1 ] && exit 1
+          echo "##vso[task.setvariable variable=hasChanges;isOutput=true]$([ "$rc" -eq 2 ] && echo true || echo false)"
+          mkdir -p "$(Build.ArtifactStagingDirectory)/tfplan"
+          cp tfplan .terraform.lock.hcl "$(Build.ArtifactStagingDirectory)/tfplan/"   # apply must use the same provider versions
+    - publish: $(Build.ArtifactStagingDirectory)/tfplan
+      artifact: tfplan_${{ parameters.environment }}
+
+  - deployment: apply
+    displayName: Apply
+    dependsOn: plan
+    condition: >-
+      and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'),
+          eq(dependencies.plan.outputs['planStep.hasChanges'], 'true'))
+    environment: ${{ parameters.environment }}
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self                 # deployment jobs don't auto-checkout
+          - download: current
+            artifact: tfplan_${{ parameters.environment }}
+          - task: AzureCLI@2
+            displayName: terraform apply
+            inputs:
+              azureSubscription: sc-azure-${{ parameters.environment }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              workingDirectory: kit/terraform
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId ARM_OIDC_TOKEN=$idToken ARM_USE_OIDC=true
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                cp $(Pipeline.Workspace)/tfplan_${{ parameters.environment }}/.terraform.lock.hcl .
+                terraform init -input=false -backend-config="key=${{ parameters.environment }}.tfstate"
+                terraform apply -input=false $(Pipeline.Workspace)/tfplan_${{ parameters.environment }}/tfplan

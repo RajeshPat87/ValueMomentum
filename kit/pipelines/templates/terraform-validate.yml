@@ -1,0 +1,19 @@
+# Terraform Gate 1: fmt + validate with no backend and no Azure call (mirror of bicep-validate.yml)
+stages:
+- stage: terraform_validate
+  displayName: Terraform validate
+  jobs:
+  - job: validate
+    displayName: fmt + validate
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+    - bash: |
+        set -euo pipefail
+        terraform version
+        terraform fmt -check -recursive
+        terraform init -backend=false -input=false
+        terraform validate
+      displayName: Gate 1 fmt + validate
+      workingDirectory: kit/terraform

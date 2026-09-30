@@ -1,0 +1,34 @@
+# Bicep Gate 1: compile + lint every file (no Azure call), then publish kit/bicep as artifact `bicep`
+# so every environment deploys exactly the files that passed here.
+stages:
+- stage: bicep_validate
+  displayName: Bicep validate
+  jobs:
+  - job: build
+    displayName: Build + lint
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+    - bash: |
+        set -euo pipefail
+        az bicep install                  # no-op when the agent already has it
+        for f in modules/*.bicep main.bicep main-rg.bicep; do
+          az bicep build -f "$f" --stdout >/dev/null && echo "OK  $f"
+        done
+        az bicep lint -f main.bicep
+        az bicep lint -f main-rg.bicep
+      displayName: Gate 1 build + lint
+      workingDirectory: kit/bicep
+    - task: CopyFiles@2
+      displayName: Stage deployable files
+      inputs:
+        SourceFolder: kit/bicep
+        Contents: |
+          *.bicep
+          *.bicepparam
+          deploy.sh
+          modules/*.bicep
+        TargetFolder: $(Build.ArtifactStagingDirectory)/bicep
+    - publish: $(Build.ArtifactStagingDirectory)/bicep
+      artifact: bicep
