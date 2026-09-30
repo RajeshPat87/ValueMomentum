@@ -18,6 +18,9 @@ provider "azurerm" {
     }
   }
   subscription_id = var.subscription_id # mandatory in azurerm 4.x
+  # 4.x registers resource providers at subscription scope by default; an RG-scoped SPN (KodeKloud) is denied that.
+  # On a fresh subscription, register them once: az provider register -n Microsoft.KeyVault (etc.)
+  resource_provider_registrations = "none"
 }
 
 provider "azapi" {}

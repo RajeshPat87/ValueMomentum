@@ -1,5 +1,7 @@
 # Azure IaC + Pipelines — Notepad Interview Kit
 
+> Runbooks (login, deploy, troubleshoot) per approach: [Bicep](bicep/README.md) · [Terraform](terraform/README.md) · [ARM JSON](arm/README.md) · [Azure CLI](cli/README.md) · [Pipelines](pipelines/README.md)
+
 Every file below is complete and deployable. The Bicep files compile cleanly with the Bicep CLI, the ARM files are valid JSON, and the Terraform and YAML files parse. Resource names and IDs are placeholders you'd swap for your own.
 
 > **Timeline for your intro:** say "ARM since 2016 → Terraform → Bicep since 2021." Bicep was announced in 2020.
@@ -1133,6 +1135,9 @@ provider "azurerm" {
     }
   }
   subscription_id = var.subscription_id # mandatory in azurerm 4.x
+  # 4.x registers resource providers at subscription scope by default; an RG-scoped SPN (KodeKloud) is denied that.
+  # On a fresh subscription, register them once: az provider register -n Microsoft.KeyVault (etc.)
+  resource_provider_registrations = "none"
 }
 
 provider "azapi" {}

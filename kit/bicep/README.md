@@ -1,5 +1,7 @@
 # Bicep Kit — Azure Landing Zone (Demo)
 
+> Other approaches for the same resources: [Terraform](../terraform/README.md) · [ARM JSON](../arm/README.md) · [Azure CLI](../cli/README.md) · [Pipelines](../pipelines/README.md)
+
 Modular Bicep that builds a small, secure Azure footprint: RG, storage, network, VM, AKS, RBAC, and Key Vault with a private endpoint.
 Each module is **one concern, one file**, and every module follows the same layout:
 
