@@ -1,0 +1,34 @@
+# Lives in repo: Platform/pipeline-templates  -> stages/bicep-stage.yml
+parameters:
+- name: environment
+  type: string
+- name: serviceConnection
+  type: string
+- name: location
+  type: string
+  default: eastus
+- name: dependsOn
+  type: object
+  default: []
+
+stages:
+- stage: bicep_${{ parameters.environment }}
+  dependsOn: ${{ parameters.dependsOn }}
+  jobs:
+  - deployment: deploy
+    environment: ${{ parameters.environment }}
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self                 # 'self' = the CALLING repo; deployment jobs don't auto-checkout
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az deployment sub create -l ${{ parameters.location }} \
+                  -f bicep/main.bicep -p bicep/main.bicepparam

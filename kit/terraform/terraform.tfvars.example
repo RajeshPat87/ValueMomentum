@@ -1,0 +1,6 @@
+subscription_id = "<subscription-id>"
+env             = "dev"
+location        = "eastus"
+deploy_vm       = true
+deploy_aks      = false
+# pass secrets via env: TF_VAR_ssh_public_key, TF_VAR_db_password

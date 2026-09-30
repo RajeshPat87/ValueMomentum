@@ -1,0 +1,69 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
+    "vnetName": { "type": "string", "defaultValue": "vnet-demo" },
+    "subnets": {
+      "type": "array",
+      "defaultValue": [
+        { "name": "snet-web", "prefix": "10.0.1.0/24" },
+        { "name": "snet-pe", "prefix": "10.0.2.0/24" }
+      ]
+    }
+  },
+  "variables": {
+    "nsgId": "[resourceId('Microsoft.Network/networkSecurityGroups', 'nsg-web')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2024-05-01",
+      "name": "nsg-web",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "Allow-HTTPS-In",
+            "properties": {
+              "priority": 100,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "443"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "[parameters('vnetName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [ "[variables('nsgId')]" ],
+      "properties": {
+        "addressSpace": { "addressPrefixes": [ "10.0.0.0/16" ] },
+        "copy": [
+          {
+            "name": "subnets",
+            "count": "[length(parameters('subnets'))]",
+            "input": {
+              "name": "[parameters('subnets')[copyIndex('subnets')].name]",
+              "properties": {
+                "addressPrefix": "[parameters('subnets')[copyIndex('subnets')].prefix]",
+                "networkSecurityGroup": { "id": "[variables('nsgId')]" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "webSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), 'snet-web')]" }
+  }
+}

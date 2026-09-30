@@ -1,0 +1,16 @@
+# Enforced template: pair with a "Required template" check on the environment / service connection
+resources:
+  repositories:
+  - repository: templates
+    type: git
+    name: Platform/pipeline-templates
+
+extends:
+  template: governance/secure-pipeline.yml@templates
+  parameters:
+    stages:
+    - stage: Build
+      jobs:
+      - job: Build
+        steps:
+        - script: echo build

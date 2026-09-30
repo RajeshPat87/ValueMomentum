@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "principalId": { "type": "string" },
+    "stgName": { "type": "string" }
+  },
+  "variables": {
+    "readerRole": "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+    "blobContributorRole": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+    "stgId": "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(resourceGroup().id, parameters('principalId'), variables('readerRole'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('readerRole'))]",
+        "principalId": "[parameters('principalId')]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[format('Microsoft.Storage/storageAccounts/{0}', parameters('stgName'))]",
+      "name": "[guid(variables('stgId'), parameters('principalId'), variables('blobContributorRole'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobContributorRole'))]",
+        "principalId": "[parameters('principalId')]",
+        "principalType": "ServicePrincipal"
+      }
+    }
+  ]
+}

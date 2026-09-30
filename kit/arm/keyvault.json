@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
+    "kvName": { "type": "string", "defaultValue": "[concat('kv-', uniqueString(resourceGroup().id))]" },
+    "dbPassword": { "type": "securestring" }
+  },
+  "variables": {
+    "kvSecretsUser": "4633458b-17de-408a-b874-0445c86b69e6",
+    "uamiId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'id-app')]",
+    "kvId": "[resourceId('Microsoft.KeyVault/vaults', parameters('kvName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "id-app",
+      "location": "[parameters('location')]"
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('kvName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "tenantId": "[subscription().tenantId]",
+        "sku": { "family": "A", "name": "standard" },
+        "enableRbacAuthorization": true,
+        "enableSoftDelete": true,
+        "softDeleteRetentionInDays": 90,
+        "enablePurgeProtection": true,
+        "publicNetworkAccess": "Disabled",
+        "networkAcls": { "defaultAction": "Deny", "bypass": "AzureServices" }
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/secrets",
+      "apiVersion": "2023-07-01",
+      "name": "[concat(parameters('kvName'), '/db-password')]",
+      "dependsOn": [ "[variables('kvId')]" ],
+      "properties": { "value": "[parameters('dbPassword')]" }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[format('Microsoft.KeyVault/vaults/{0}', parameters('kvName'))]",
+      "name": "[guid(variables('kvId'), variables('uamiId'), variables('kvSecretsUser'))]",
+      "dependsOn": [ "[variables('kvId')]", "[variables('uamiId')]" ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('kvSecretsUser'))]",
+        "principalId": "[reference(variables('uamiId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    }
+  ]
+}

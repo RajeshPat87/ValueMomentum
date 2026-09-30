@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "subnetId": { "value": "/subscriptions/<sub-id>/resourceGroups/rg-demo/providers/Microsoft.Network/virtualNetworks/vnet-demo/subnets/snet-web" },
+    "sshPublicKey": {
+      "reference": {
+        "keyVault": { "id": "/subscriptions/<sub-id>/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-prod" },
+        "secretName": "vm-ssh-public-key"
+      }
+    }
+  }
+}

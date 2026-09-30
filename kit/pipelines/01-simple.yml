@@ -1,0 +1,33 @@
+# Root mnemonic T-R-V-P-S: Trigger, Resources, Variables, Pool, Stages/Jobs/Steps
+trigger:
+  branches:
+    include: [main]
+  paths:
+    exclude: [docs/*]
+
+pr:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  rgName: rg-demo
+  location: eastus
+
+steps:
+- checkout: self
+
+- script: az bicep build -f bicep/main.bicep
+  displayName: Bicep lint/build
+
+- task: AzureCLI@2
+  displayName: Deploy RG (Bicep)
+  inputs:
+    azureSubscription: sc-azure-dev        # ARM service connection (workload identity federation)
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      az deployment sub create -l $(location) \
+        -f bicep/modules/01-rg.bicep -p rgName=$(rgName)

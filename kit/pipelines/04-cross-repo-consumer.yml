@@ -1,0 +1,45 @@
+# App/infra repo pipeline that CALLS templates from another repo and is TRIGGERED by another pipeline
+resources:
+  repositories:
+  - repository: templates                   # alias used after '@'
+    type: git                               # Azure Repos
+    name: Platform/pipeline-templates       # <Project>/<Repo>
+    ref: refs/tags/v1.4.0                   # pin a version
+  - repository: ghTemplates
+    type: github
+    name: myorg/pipeline-templates
+    endpoint: sc-github                     # GitHub service connection
+    ref: refs/heads/main
+  pipelines:
+  - pipeline: upstream                      # alias
+    source: infra-ci                        # upstream pipeline NAME
+    project: Platform
+    trigger:
+      branches:
+        include: [main]                     # run when infra-ci succeeds on main
+
+trigger: none
+
+stages:
+- template: stages/terraform-stage.yml@templates
+  parameters:
+    environment: dev
+    serviceConnection: sc-azure-dev
+
+- template: stages/terraform-stage.yml@templates
+  parameters:
+    environment: prod
+    serviceConnection: sc-azure-prod
+    dependsOn: [tf_dev]
+
+- stage: UseUpstream
+  dependsOn: []                             # runs in parallel with tf_dev
+  jobs:
+  - job: fetch
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: templates                   # check out the OTHER repo
+    - download: upstream                    # artifacts from the triggering pipeline
+      artifact: drop
+    - script: echo "Upstream run $(resources.pipeline.upstream.runID)"

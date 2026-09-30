@@ -1,0 +1,19 @@
+# Secrets / local credentials — never commit
+az-login.sh
+**/az-login.sh
+*.tfvars
+!*.tfvars.example
+.env
+*.pem
+
+# Terraform local state
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Windows download metadata (WSL)
+*:Zone.Identifier
+*Zone.Identifier

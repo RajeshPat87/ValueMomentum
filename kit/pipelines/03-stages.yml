@@ -1,0 +1,70 @@
+# Hierarchy S-J-S: Stages -> Jobs -> Steps
+trigger:
+  branches:
+    include: [main]
+
+variables:
+- group: vg-common                 # variable group (can be Key Vault-linked)
+- name: location
+  value: eastus
+
+stages:
+- stage: Build
+  jobs:
+  - job: Build
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: az bicep build -f bicep/main.bicep
+    - publish: $(System.DefaultWorkingDirectory)/bicep
+      artifact: bicep
+
+- stage: Dev
+  dependsOn: Build
+  variables:
+  - group: vg-dev
+  jobs:
+  - deployment: DeployDev
+    environment: dev
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: bicep
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: sc-azure-dev
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az deployment sub create -l $(location) \
+                  -f $(Pipeline.Workspace)/bicep/main.bicep \
+                  -p $(Pipeline.Workspace)/bicep/main.bicepparam
+
+- stage: Prod
+  dependsOn: Dev
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployProd
+    environment: prod               # approvals & checks are configured on the environment
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: bicep
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: sc-azure-prod
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az deployment sub what-if -l $(location) -f $(Pipeline.Workspace)/bicep/main.bicep \
+                  -p $(Pipeline.Workspace)/bicep/main.bicepparam
+                az deployment sub create  -l $(location) -f $(Pipeline.Workspace)/bicep/main.bicep \
+                  -p $(Pipeline.Workspace)/bicep/main.bicepparam

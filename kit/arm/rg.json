@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "rgName": { "type": "string", "defaultValue": "rg-demo" },
+    "location": { "type": "string", "defaultValue": "eastus" }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('rgName')]",
+      "location": "[parameters('location')]",
+      "tags": { "env": "dev" }
+    }
+  ],
+  "outputs": {
+    "rgId": { "type": "string", "value": "[subscriptionResourceId('Microsoft.Resources/resourceGroups', parameters('rgName'))]" }
+  }
+}

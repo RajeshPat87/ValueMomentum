@@ -1,0 +1,46 @@
+# Jobs run in PARALLEL unless dependsOn is set
+trigger: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+- job: BicepLint
+  displayName: Bicep build
+  steps:
+  - script: az bicep build -f bicep/main.bicep
+
+- job: TerraformLint
+  displayName: Terraform fmt/validate
+  steps:
+  - script: |
+      cd terraform
+      terraform fmt -check -recursive
+      terraform init -backend=false
+      terraform validate
+
+- job: ScriptTests
+  strategy:
+    matrix:
+      py310: { pythonVersion: '3.10' }
+      py312: { pythonVersion: '3.12' }
+    maxParallel: 2
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(pythonVersion)
+  - script: python --version
+
+- job: Package
+  dependsOn: [BicepLint, TerraformLint, ScriptTests]   # fan-in
+  condition: succeeded()
+  timeoutInMinutes: 20
+  steps:
+  - task: CopyFiles@2
+    inputs:
+      Contents: |
+        bicep/**
+        terraform/**
+      TargetFolder: $(Build.ArtifactStagingDirectory)
+  - publish: $(Build.ArtifactStagingDirectory)
+    artifact: iac
