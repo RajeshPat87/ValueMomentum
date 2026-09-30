@@ -3,13 +3,21 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
-    "kvName": { "type": "string", "defaultValue": "[concat('kv-', uniqueString(resourceGroup().id))]" },
-    "dbPassword": { "type": "securestring" }
+    "kvName": { "type": "string", "defaultValue": "[concat('kv-', uniqueString(resourceGroup().id))]", "minLength": 3, "maxLength": 24 },
+    "dbPassword": { "type": "securestring", "defaultValue": "", "metadata": { "description": "Optional; stored as secret db-password when set" } },
+    "softDeleteRetentionInDays": { "type": "int", "defaultValue": 90, "minValue": 7, "maxValue": 90 },
+    "enablePurgeProtection": { "type": "bool", "defaultValue": true, "metadata": { "description": "Permanent once enabled; some policies forbid it" } },
+    "deployRoleAssignment": { "type": "bool", "defaultValue": true, "metadata": { "description": "False where the deployer lacks roleAssignments/write" } },
+    "vnetId": { "type": "string", "defaultValue": "", "metadata": { "description": "With peSubnetId: adds private endpoint + private DNS" } },
+    "peSubnetId": { "type": "string", "defaultValue": "" }
   },
   "variables": {
     "kvSecretsUser": "4633458b-17de-408a-b874-0445c86b69e6",
     "uamiId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'id-app')]",
-    "kvId": "[resourceId('Microsoft.KeyVault/vaults', parameters('kvName'))]"
+    "kvId": "[resourceId('Microsoft.KeyVault/vaults', parameters('kvName'))]",
+    "peName": "[concat('pe-', parameters('kvName'))]",
+    "dnsZone": "privatelink.vaultcore.azure.net",
+    "deployPe": "[and(not(empty(parameters('peSubnetId'))), not(empty(parameters('vnetId'))))]"
   },
   "resources": [
     {
@@ -28,13 +36,14 @@
         "sku": { "family": "A", "name": "standard" },
         "enableRbacAuthorization": true,
         "enableSoftDelete": true,
-        "softDeleteRetentionInDays": 90,
-        "enablePurgeProtection": true,
+        "softDeleteRetentionInDays": "[parameters('softDeleteRetentionInDays')]",
+        "enablePurgeProtection": "[if(parameters('enablePurgeProtection'), true(), null())]",
         "publicNetworkAccess": "Disabled",
         "networkAcls": { "defaultAction": "Deny", "bypass": "AzureServices" }
       }
     },
     {
+      "condition": "[not(empty(parameters('dbPassword')))]",
       "type": "Microsoft.KeyVault/vaults/secrets",
       "apiVersion": "2023-07-01",
       "name": "[concat(parameters('kvName'), '/db-password')]",
@@ -42,6 +51,7 @@
       "properties": { "value": "[parameters('dbPassword')]" }
     },
     {
+      "condition": "[parameters('deployRoleAssignment')]",
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
       "scope": "[format('Microsoft.KeyVault/vaults/{0}', parameters('kvName'))]",
@@ -52,6 +62,56 @@
         "principalId": "[reference(variables('uamiId'), '2023-01-31').principalId]",
         "principalType": "ServicePrincipal"
       }
+    },
+    {
+      "condition": "[variables('deployPe')]",
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('peName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [ "[variables('kvId')]" ],
+      "properties": {
+        "subnet": { "id": "[parameters('peSubnetId')]" },
+        "privateLinkServiceConnections": [
+          { "name": "psc-kv", "properties": { "privateLinkServiceId": "[variables('kvId')]", "groupIds": [ "vault" ] } }
+        ]
+      }
+    },
+    {
+      "condition": "[variables('deployPe')]",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2024-06-01",
+      "name": "[variables('dnsZone')]",
+      "location": "global"
+    },
+    {
+      "condition": "[variables('deployPe')]",
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2024-06-01",
+      "name": "[concat(variables('dnsZone'), '/link-vnet')]",
+      "location": "global",
+      "dependsOn": [ "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZone'))]" ],
+      "properties": { "virtualNetwork": { "id": "[parameters('vnetId')]" }, "registrationEnabled": false }
+    },
+    {
+      "condition": "[variables('deployPe')]",
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[concat(variables('peName'), '/default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', variables('peName'))]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZone'))]"
+      ],
+      "properties": {
+        "privateDnsZoneConfigs": [
+          { "name": "kv", "properties": { "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZone'))]" } }
+        ]
+      }
     }
-  ]
+  ],
+  "outputs": {
+    "kvName": { "type": "string", "value": "[parameters('kvName')]" },
+    "kvUri": { "type": "string", "value": "[reference(variables('kvId'), '2023-07-01').vaultUri]" },
+    "uamiPrincipalId": { "type": "string", "value": "[reference(variables('uamiId'), '2023-01-31').principalId]" }
+  }
 }

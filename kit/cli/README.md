@@ -4,100 +4,128 @@ The same resources as the other kits, two ways with the Azure CLI:
 
 | Script | Style | What it shows |
 |--------|-------|---------------|
-| `01-direct-create.sh` | **Imperative**: one `az <noun> create` per resource | Exact CLI syntax for RG, storage, VNet/NSG, VM, AKS, identity, Key Vault + PE, RBAC, custom role, policy |
+| `01-direct-create.sh` | **Imperative**: one `az <noun> create` per resource | Exact CLI syntax for RG, storage, VNet/NSG, VM, AKS, identity, Key Vault + PE, RBAC, custom role, policy. Same feature flags as Bicep |
 | `02-deploy-templates.sh` | **Declarative**: `az deployment ...` with the Bicep and ARM files | Scope rule, what-if, `bicep build`/`decompile`, deployment stacks, troubleshooting |
-
-Both are reference scripts: read them section by section and run what you need, rather than executing them top to bottom.
 
 ---
 
-## 1. Log in
+## 1. Log in and set secrets
 
-Same service principal as the Bicep kit: [Bicep README section 1](../bicep/README.md#1-log-in-with-the-service-principal-kodekloud-playground).
+Same service principal and secrets as the Bicep kit: [Bicep README section 1](../bicep/README.md#1-log-in-with-the-service-principal-kodekloud-playground).
 
 ```bash
 cd ValueMomentum/kit/cli
-source ../bicep/modules/az-login.sh
+source ../bicep/modules/az-login.sh      # exports RG and ARM_SUBSCRIPTION_ID
+source ../bicep/modules/set-secrets.sh   # exports SSH_PUBLIC_KEY and DB_PASSWORD
 ```
-
-The scripts start with placeholders (`SUB_ID="<subscription-id>"`, `RG=rg-demo`). Set them to your values first, e.g. `RG=$RG` and `SUB_ID=$ARM_SUBSCRIPTION_ID`.
 
 ---
 
-## 2. The CLI pattern
+## 2. `01-direct-create.sh`
 
+### Run it
+
+```bash
+# KodeKloud playground (RG-scoped SPN, Key Vault policy)
+DEPLOY_RBAC=false KV_PURGE_PROTECTION=false KV_SOFT_DELETE_DAYS=7 ./01-direct-create.sh
+
+# Your own subscription: secure defaults, creates rg-demo if $RG is unset
+./01-direct-create.sh
 ```
-az <noun> [<sub-noun>] <verb> -g <rg> -n <name> [-l <region>] --flags
-az ... show ... --query id -o tsv          # capture an ID for the next command
-```
 
-| Need | Command shape |
-|------|---------------|
-| Create | `az network vnet create -g $RG -n vnet-demo --address-prefixes 10.0.0.0/16` |
-| Child resource | `az network vnet subnet create -g $RG --vnet-name vnet-demo -n snet-pe ...` |
-| Capture an ID | `VNET_ID=$(az network vnet show -g $RG -n vnet-demo --query id -o tsv)` |
-| Assign a role | `az role assignment create --assignee-object-id <oid> --assignee-principal-type ServicePrincipal --role "<name>" --scope <id>` |
-| Deploy a template | `az deployment group create -g $RG -f file.bicep` (or `.json`) |
+### Inputs
 
----
+Environment variables with the same meaning as the Bicep flags:
 
-## 3. `01-direct-create.sh`, section by section
+| Variable | Default | Playground | Bicep flag |
+|----------|---------|------------|------------|
+| `RG` | `rg-demo` | lab RG (from `az-login.sh`) | `-g` / `rgName` |
+| `LOC` | `eastus` | — (an existing RG keeps its region) | `location` |
+| `VM_SIZE` | `Standard_B1s` | same | `vmSize` |
+| `DEPLOY_VM` | `true` | `true` | `deployVm` |
+| `DEPLOY_AKS` | `false` | `false` | `deployAks` |
+| `DEPLOY_RBAC` | `true` | `false` | `deployRbac` (role assignments, custom role, policy) |
+| `KV_PURGE_PROTECTION` | `true` | `false` | `kvPurgeProtection` |
+| `KV_SOFT_DELETE_DAYS` | `90` | `7` | `kvSoftDeleteDays` |
+| `SSH_PUBLIC_KEY` | required | `set-secrets.sh` | `sshPublicKey` |
+| `DB_PASSWORD` | empty = no secret | `set-secrets.sh` | `dbPassword` |
+
+The RG is only created when it doesn't exist. Storage and Key Vault names get a suffix hashed from subscription + RG,
+so a re-run reuses the same names instead of creating new resources (most `az ... create` commands are idempotent PUTs).
+
+### Section by section
 
 | Section | Resources | Order matters because |
 |---------|-----------|-----------------------|
-| Resource group | `rg-demo` | Everything else lives in it |
-| Storage | `stdemo$RANDOM` + `data` container | Container is a child of the account |
-| Networking | `nsg-web`, `vnet-demo`, `snet-web` / `snet-pe` / `snet-aks` | VM, AKS and PE need subnet IDs |
-| VM | `vm01`, no public IP, system-assigned MI | Needs `WEB_SUBNET_ID` |
+| Resource group | reuse `$RG` or create it | Everything else lives in it |
+| Storage | `stdemo<hash>` + `data` container | Container is a child of the account |
+| Networking | `nsg-web` (rule `Allow-443-In`), `vnet-demo`, `snet-web` / `snet-pe` / `snet-aks`, NSG on every subnet | VM, AKS and PE need subnet IDs |
+| VM | `vm01`, no public IP, StandardSSD disk, system-assigned MI | Needs `WEB_SUBNET_ID` |
 | AKS | `aks-demo`, Azure CNI, Entra RBAC, OIDC + workload identity | Needs `AKS_SUBNET_ID` |
-| Security | `id-app`, Key Vault, secret, PE + private DNS | Secret is seeded **before** public access is disabled |
-| RBAC | UAMI grants, VM Reader, custom VM Operator role | Needs the principal IDs captured above |
+| Security | `id-app`, Key Vault (private from the start), `db-password`, PE `pe-<kv>` + private DNS | Secret needs the vault; PE needs vault + subnet |
+| RBAC | UAMI: Key Vault Secrets User, Blob Data Contributor, Reader, custom VM Operator role | Needs the principal and resource IDs captured above |
 | Governance | "Allowed locations" policy on the RG | — |
 
-**The Key Vault ordering is the lesson here.** `az keyvault secret set` talks to the vault's data plane, so it needs network access:
-create the vault open → grant yourself Secrets Officer → write the secret → lock the vault down → add the private endpoint.
-Templates avoid this dance by writing the secret through ARM (see the [Bicep](../bicep/README.md) and [Terraform](../terraform/README.md) kits).
+### The Key Vault secret: control plane vs data plane
 
-## 4. `02-deploy-templates.sh`
+`az keyvault secret set` talks to the vault's own endpoint (data plane). With public access disabled that needs network access to the vault,
+plus a data role like Key Vault Secrets Officer, which the playground SPN can't grant itself.
 
-The same commands deploy Bicep and ARM; only the file changes. Highlights:
+The script instead writes the secret through Azure Resource Manager (control plane), the same way Bicep, ARM and Terraform's `azapi` do:
 
 ```bash
-az deployment sub create   -l eastus -f ../bicep/modules/01-rg.bicep -p rgName=rg-demo   # targetScope = subscription
-az deployment group what-if -g $RG   -f ../bicep/modules/03-network.bicep                 # preview
-az deployment group create -g $RG    -f ../arm/storage.json -p @../arm/storage.parameters.json
+az rest --method put \
+  --url "https://management.azure.com${KV_ID}/secrets/db-password?api-version=2023-07-01" \
+  --body @body.json          # {"properties":{"value":"..."}}, written to a private temp file
+```
+
+So the vault is created locked down and stays that way; no open-then-close dance.
+
+---
+
+## 3. `02-deploy-templates.sh`
+
+A reference for the template commands. The same commands deploy Bicep and ARM; only the file changes.
+Subscription-scope lines are skipped unless `SUB_SCOPE=true`.
+
+```bash
+az deployment group create  -g $RG -f ../bicep/modules/02-storage.bicep -n storage       # default scope = RG
+az deployment group what-if -g $RG -f ../bicep/modules/03-network.bicep                  # preview
+az deployment group create  -g $RG -p ../bicep/main-rg.bicepparam -n main-rg             # everything, existing RG
+az deployment group create  -g $RG -f ../arm/storage.json -p @../arm/storage.parameters.json -n storage
 az bicep build     -f ../bicep/main.bicep       # Bicep -> ARM
 az bicep decompile -f ../arm/network.json       # ARM -> Bicep
 az stack group create -n stack-demo -g $RG -f ../bicep/modules/02-storage.bicep \
-  --action-on-unmanage deleteResources --deny-settings-mode denyDelete   # deletes what leaves the template
+  --action-on-unmanage deleteResources --deny-settings-mode none --yes    # deletes what leaves the template
 ```
 
-For the full, playground-ready Bicep flow use `../bicep/deploy.sh` instead.
+For dependency wiring between modules, use `../bicep/deploy.sh` or `../arm/deploy.sh`.
 
 ---
 
-## 5. Playground notes
+## 4. Playground notes
 
-`01-direct-create.sh` is written for a subscription you own. On an RG-scoped playground SPN:
+| Item | Behaviour |
+|------|-----------|
+| Resource group | Reused, never recreated; no subscription rights needed |
+| Storage container | `--auth-mode key`: needs only Contributor (`listKeys`) |
+| Key Vault | Playground flags drop purge protection and use 7-day retention; secret goes through ARM |
+| RBAC, custom role, policy | Skipped with `DEPLOY_RBAC=false` |
+| AKS | Off by default (`DEPLOY_AKS=true` to try; quota and size policy may block it) |
+| Deployment stacks with `denyDelete` | Needs `deploymentStacks/manageDenySetting/action`, so the script uses `none` |
 
-| Line | Problem | Fix |
-|------|---------|-----|
-| `az group create` | No subscription rights | Skip it; set `RG` to the lab RG |
-| `az storage container create --auth-mode login` | Needs a blob data role | Use `--auth-mode key` |
-| `az vm create --size Standard_B2s` | Size may be blocked by policy | `--size Standard_B1s` |
-| `az keyvault create --enable-purge-protection true --retention-days 90` | Playground policy | Drop purge protection, `--retention-days 7` |
-| `az ad signed-in-user show` | Only works for a user, not a service principal | Use the SPN's object ID (Bicep README section 2.1) |
-| `az role assignment create`, `az role definition create`, `az policy assignment create` | Need Owner / User Access Administrator | Skip on the playground |
-| `az aks create` | Quota / size policy | Skip unless quota allows |
+Clean up: CLI resources aren't in ARM deployment history, so `cleanup.sh` doesn't see them. Delete by name
+(`az resource list -g "$RG" --query "[?!starts_with(name,'nautilus')].id" -o tsv | xargs -r -n1 az resource delete --ids`), then
+`az keyvault purge -n kv-demo-<hash>` if you need the vault name again.
 
 ---
 
-## 6. Imperative vs declarative — when to use which
+## 5. Imperative vs declarative — when to use which
 
 | | CLI direct (`01`) | Templates (`02`, Bicep, ARM, Terraform) |
 |---|---|---|
 | Good for | One-off fixes, exploration, learning resource properties | Anything you'll run twice |
-| Re-run | Fails or duplicates (`already exists`) unless you script checks | Idempotent: converges to the same state |
+| Re-run | Works here because names are stable and creates are PUTs; order and existence checks are on you | Idempotent by design: converges to the same state |
 | Preview | None | `what-if` / `plan` |
 | Order | You manage it | Dependency graph works it out |
 | Drift / history | None | Deployment history or state |

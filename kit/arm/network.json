@@ -8,8 +8,11 @@
       "type": "array",
       "defaultValue": [
         { "name": "snet-web", "prefix": "10.0.1.0/24" },
-        { "name": "snet-pe", "prefix": "10.0.2.0/24" }
-      ]
+        { "name": "snet-pe", "prefix": "10.0.2.0/24" },
+        { "name": "snet-aks", "prefix": "10.0.4.0/22" }
+      ],
+      "minLength": 3,
+      "metadata": { "description": "Order matters: [0] web, [1] private endpoints, [2] aks" }
     }
   },
   "variables": {
@@ -24,7 +27,7 @@
       "properties": {
         "securityRules": [
           {
-            "name": "Allow-HTTPS-In",
+            "name": "Allow-443-In",
             "properties": {
               "priority": 100,
               "direction": "Inbound",
@@ -64,6 +67,9 @@
     }
   ],
   "outputs": {
-    "webSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), 'snet-web')]" }
+    "vnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]" },
+    "webSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnets')[0].name)]" },
+    "peSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnets')[1].name)]" },
+    "aksSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnets')[2].name)]" }
   }
 }

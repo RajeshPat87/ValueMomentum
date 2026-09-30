@@ -120,7 +120,7 @@ Repeat any file you missed on day +1, +3 and +7.
 
 ```
 bicep/     main.bicep, main-rg.bicep (+ .bicepparam), deploy.sh, modules/01-rg … 07-security
-arm/       rg, storage(+params), network, vm(+KV-reference params), rbac, keyvault
+arm/       rg, storage(+params), network, vm(+KV-reference params), rbac, keyvault(+playground params), deploy.sh
 cli/       01-direct-create.sh, 02-deploy-templates.sh
 terraform/ providers, variables, main, network, compute, security, rbac, outputs, env/<env>.tfvars, deploy.sh, bootstrap-state.sh
 pipelines/ azure-pipelines.yml, templates/ (bicep|terraform)-(validate|deploy), examples/
@@ -646,7 +646,8 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
   "contentVersion": "1.0.0.0",
   "parameters": {
     "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
-    "stgName": { "type": "string", "defaultValue": "[concat('st', uniqueString(resourceGroup().id))]", "minLength": 3, "maxLength": 24 }
+    "stgName": { "type": "string", "defaultValue": "[concat('st', uniqueString(resourceGroup().id))]", "minLength": 3, "maxLength": 24 },
+    "skuName": { "type": "string", "defaultValue": "Standard_LRS", "allowedValues": [ "Standard_LRS", "Standard_GRS", "Standard_ZRS" ] }
   },
   "resources": [
     {
@@ -654,7 +655,7 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
       "apiVersion": "2023-05-01",
       "name": "[parameters('stgName')]",
       "location": "[parameters('location')]",
-      "sku": { "name": "Standard_LRS" },
+      "sku": { "name": "[parameters('skuName')]" },
       "kind": "StorageV2",
       "properties": {
         "minimumTlsVersion": "TLS1_2",
@@ -670,7 +671,8 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
     }
   ],
   "outputs": {
-    "stgId": { "type": "string", "value": "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgName'))]" }
+    "stgId": { "type": "string", "value": "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgName'))]" },
+    "stgName": { "type": "string", "value": "[parameters('stgName')]" }
   }
 }
 ```
@@ -682,7 +684,7 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "stgName": { "value": "stdemo12345" }
+    "skuName": { "value": "Standard_LRS" }
   }
 }
 ```
@@ -700,8 +702,11 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
       "type": "array",
       "defaultValue": [
         { "name": "snet-web", "prefix": "10.0.1.0/24" },
-        { "name": "snet-pe", "prefix": "10.0.2.0/24" }
-      ]
+        { "name": "snet-pe", "prefix": "10.0.2.0/24" },
+        { "name": "snet-aks", "prefix": "10.0.4.0/22" }
+      ],
+      "minLength": 3,
+      "metadata": { "description": "Order matters: [0] web, [1] private endpoints, [2] aks" }
     }
   },
   "variables": {
@@ -716,7 +721,7 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
       "properties": {
         "securityRules": [
           {
-            "name": "Allow-HTTPS-In",
+            "name": "Allow-443-In",
             "properties": {
               "priority": 100,
               "direction": "Inbound",
@@ -756,7 +761,10 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
     }
   ],
   "outputs": {
-    "webSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), 'snet-web')]" }
+    "vnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]" },
+    "webSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnets')[0].name)]" },
+    "peSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnets')[1].name)]" },
+    "aksSubnetId": { "type": "string", "value": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnets')[2].name)]" }
   }
 }
 ```
@@ -772,6 +780,8 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
     "vmName": { "type": "string", "defaultValue": "vm01" },
     "subnetId": { "type": "string" },
     "adminUsername": { "type": "string", "defaultValue": "azureuser" },
+    "vmSize": { "type": "string", "defaultValue": "Standard_B1s", "allowedValues": [ "Standard_B1s", "Standard_B2s", "Standard_D2s_v5" ] },
+    "osDiskType": { "type": "string", "defaultValue": "StandardSSD_LRS", "allowedValues": [ "Standard_LRS", "StandardSSD_LRS", "Premium_LRS" ] },
     "sshPublicKey": { "type": "securestring" }
   },
   "variables": {
@@ -803,7 +813,7 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
       "dependsOn": [ "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]" ],
       "identity": { "type": "SystemAssigned" },
       "properties": {
-        "hardwareProfile": { "vmSize": "Standard_B2s" },
+        "hardwareProfile": { "vmSize": "[parameters('vmSize')]" },
         "osProfile": {
           "computerName": "[parameters('vmName')]",
           "adminUsername": "[parameters('adminUsername')]",
@@ -821,7 +831,7 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
         },
         "storageProfile": {
           "imageReference": { "publisher": "Canonical", "offer": "ubuntu-24_04-lts", "sku": "server", "version": "latest" },
-          "osDisk": { "createOption": "FromImage", "managedDisk": { "storageAccountType": "Premium_LRS" } }
+          "osDisk": { "createOption": "FromImage", "managedDisk": { "storageAccountType": "[parameters('osDiskType')]" } }
         },
         "networkProfile": {
           "networkInterfaces": [ { "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]" } ]
@@ -902,13 +912,21 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
   "contentVersion": "1.0.0.0",
   "parameters": {
     "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
-    "kvName": { "type": "string", "defaultValue": "[concat('kv-', uniqueString(resourceGroup().id))]" },
-    "dbPassword": { "type": "securestring" }
+    "kvName": { "type": "string", "defaultValue": "[concat('kv-', uniqueString(resourceGroup().id))]", "minLength": 3, "maxLength": 24 },
+    "dbPassword": { "type": "securestring", "defaultValue": "", "metadata": { "description": "Optional; stored as secret db-password when set" } },
+    "softDeleteRetentionInDays": { "type": "int", "defaultValue": 90, "minValue": 7, "maxValue": 90 },
+    "enablePurgeProtection": { "type": "bool", "defaultValue": true, "metadata": { "description": "Permanent once enabled; some policies forbid it" } },
+    "deployRoleAssignment": { "type": "bool", "defaultValue": true, "metadata": { "description": "False where the deployer lacks roleAssignments/write" } },
+    "vnetId": { "type": "string", "defaultValue": "", "metadata": { "description": "With peSubnetId: adds private endpoint + private DNS" } },
+    "peSubnetId": { "type": "string", "defaultValue": "" }
   },
   "variables": {
     "kvSecretsUser": "4633458b-17de-408a-b874-0445c86b69e6",
     "uamiId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'id-app')]",
-    "kvId": "[resourceId('Microsoft.KeyVault/vaults', parameters('kvName'))]"
+    "kvId": "[resourceId('Microsoft.KeyVault/vaults', parameters('kvName'))]",
+    "peName": "[concat('pe-', parameters('kvName'))]",
+    "dnsZone": "privatelink.vaultcore.azure.net",
+    "deployPe": "[and(not(empty(parameters('peSubnetId'))), not(empty(parameters('vnetId'))))]"
   },
   "resources": [
     {
@@ -927,13 +945,14 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
         "sku": { "family": "A", "name": "standard" },
         "enableRbacAuthorization": true,
         "enableSoftDelete": true,
-        "softDeleteRetentionInDays": 90,
-        "enablePurgeProtection": true,
+        "softDeleteRetentionInDays": "[parameters('softDeleteRetentionInDays')]",
+        "enablePurgeProtection": "[if(parameters('enablePurgeProtection'), true(), null())]",
         "publicNetworkAccess": "Disabled",
         "networkAcls": { "defaultAction": "Deny", "bypass": "AzureServices" }
       }
     },
     {
+      "condition": "[not(empty(parameters('dbPassword')))]",
       "type": "Microsoft.KeyVault/vaults/secrets",
       "apiVersion": "2023-07-01",
       "name": "[concat(parameters('kvName'), '/db-password')]",
@@ -941,6 +960,7 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
       "properties": { "value": "[parameters('dbPassword')]" }
     },
     {
+      "condition": "[parameters('deployRoleAssignment')]",
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
       "scope": "[format('Microsoft.KeyVault/vaults/{0}', parameters('kvName'))]",
@@ -951,9 +971,137 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
         "principalId": "[reference(variables('uamiId'), '2023-01-31').principalId]",
         "principalType": "ServicePrincipal"
       }
+    },
+    {
+      "condition": "[variables('deployPe')]",
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('peName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [ "[variables('kvId')]" ],
+      "properties": {
+        "subnet": { "id": "[parameters('peSubnetId')]" },
+        "privateLinkServiceConnections": [
+          { "name": "psc-kv", "properties": { "privateLinkServiceId": "[variables('kvId')]", "groupIds": [ "vault" ] } }
+        ]
+      }
+    },
+    {
+      "condition": "[variables('deployPe')]",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2024-06-01",
+      "name": "[variables('dnsZone')]",
+      "location": "global"
+    },
+    {
+      "condition": "[variables('deployPe')]",
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2024-06-01",
+      "name": "[concat(variables('dnsZone'), '/link-vnet')]",
+      "location": "global",
+      "dependsOn": [ "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZone'))]" ],
+      "properties": { "virtualNetwork": { "id": "[parameters('vnetId')]" }, "registrationEnabled": false }
+    },
+    {
+      "condition": "[variables('deployPe')]",
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[concat(variables('peName'), '/default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', variables('peName'))]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZone'))]"
+      ],
+      "properties": {
+        "privateDnsZoneConfigs": [
+          { "name": "kv", "properties": { "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZone'))]" } }
+        ]
+      }
     }
-  ]
+  ],
+  "outputs": {
+    "kvName": { "type": "string", "value": "[parameters('kvName')]" },
+    "kvUri": { "type": "string", "value": "[reference(variables('kvId'), '2023-07-01').vaultUri]" },
+    "uamiPrincipalId": { "type": "string", "value": "[reference(variables('uamiId'), '2023-01-31').principalId]" }
+  }
 }
+```
+
+### `arm/keyvault.playground.parameters.json`
+
+Playground values for `keyvault.json`: `-p @keyvault.playground.parameters.json`.
+
+```json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "enablePurgeProtection": { "value": false },
+    "softDeleteRetentionInDays": { "value": 7 },
+    "deployRoleAssignment": { "value": false }
+  }
+}
+```
+
+### `arm/deploy.sh`
+
+Deploys the ARM files in dependency order, reading outputs from earlier deployments (mirror of `bicep/deploy.sh`).
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh <action> <target> — deploy the hand-written ARM templates in dependency order (mirror of ../bicep/deploy.sh)
+#
+#   action : validate | what-if | create
+#   target : rg (subscription scope) | storage | network | vm | keyvault | rbac
+#
+# Env: RG (resource group targets), RG_NAME + LOCATION (rg target; defaults rg-demo / eastus),
+#      SSH_PUBLIC_KEY (vm), DB_PASSWORD (keyvault, optional),
+#      EXTRA_PARAMS (optional "name=value" or "@file.json" overrides)
+#      Playground: EXTRA_PARAMS=@keyvault.playground.parameters.json ./deploy.sh create keyvault
+#
+# vm and keyvault read network outputs; rbac reads keyvault + storage outputs. The deployment name is the target.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+usage() { sed -n '2,11p' "$0" >&2; exit 2; }
+action=${1:-}; target=${2:-}
+case "$action" in validate|what-if|create) ;; *) usage ;; esac
+
+# output <deployment> <name>: read an output from an earlier deployment in $RG
+output() {
+  az deployment group show -g "$RG" -n "$1" --query "properties.outputs.$2.value" -o tsv 2>/dev/null |
+    grep . || { echo "ERROR: no output '$2' from deployment '$1' in $RG. Deploy target '$1' first." >&2; exit 1; }
+}
+
+params=()
+case "$target" in
+  rg)       params=(rgName="${RG_NAME:-rg-demo}" location="${LOCATION:-eastus}") ;;
+  storage)  params=(@storage.parameters.json) ;;
+  network)  ;;
+  vm)       params=(subnetId="$(output network webSubnetId)" sshPublicKey="${SSH_PUBLIC_KEY:?source set-secrets.sh first}") ;;
+  keyvault) params=(vnetId="$(output network vnetId)" peSubnetId="$(output network peSubnetId)" dbPassword="${DB_PASSWORD:-}") ;;
+  rbac)     params=(principalId="$(output keyvault uamiPrincipalId)" stgName="$(output storage stgName)") ;;
+  *)        usage ;;
+esac
+
+if [ "$target" = rg ]; then
+  at=(sub -l "${LOCATION:-eastus}"); show=(sub)
+else
+  : "${RG:?export RG=<resource group> first}"
+  at=(group -g "$RG"); show=(group -g "$RG")
+fi
+
+args=(-f "$target.json")
+[ ${#params[@]} -gt 0 ] && args+=(-p "${params[@]}")
+read -ra extra <<< "${EXTRA_PARAMS:-}"
+[ ${#extra[@]} -gt 0 ] && args+=(-p "${extra[@]}")
+
+echo "==> az deployment ${at[0]} $action  target=$target"
+case "$action" in
+  validate) az deployment "${at[@]}" validate -n "$target" "${args[@]}" -o none && echo "valid" ;;
+  what-if)  az deployment "${at[@]}" what-if  -n "$target" "${args[@]}" ;;
+  create)   az deployment "${at[@]}" create   -n "$target" "${args[@]}" -o none
+            az deployment "${show[@]}" show -n "$target" --query properties.outputs -o json ;;
+esac
 ```
 
 ---
@@ -965,92 +1113,115 @@ ARM = the Bicep above in JSON. Differences to say out loud: explicit `dependsOn`
 ```bash
 #!/usr/bin/env bash
 # DIRECT creation (no template). Pattern: az <noun> [<sub>] <verb> -g -n -l --flags ; capture: --query id -o tsv
+# Same resources and flags as the Bicep kit. Secure defaults; playground run:
+#   source ../bicep/modules/az-login.sh && source ../bicep/modules/set-secrets.sh
+#   DEPLOY_RBAC=false KV_PURGE_PROTECTION=false KV_SOFT_DELETE_DAYS=7 ./01-direct-create.sh
 set -euo pipefail
 
-SUB_ID="<subscription-id>"
-RG=rg-demo
-LOC=eastus
-SFX=$RANDOM
+# ---------- Inputs (env overrides, same meaning as the Bicep flags) ----------
+RG=${RG:-rg-demo}                             # existing RG is reused, otherwise created
+LOC=${LOC:-eastus}
+VM_SIZE=${VM_SIZE:-Standard_B1s}
+DEPLOY_VM=${DEPLOY_VM:-true}
+DEPLOY_AKS=${DEPLOY_AKS:-false}
+DEPLOY_RBAC=${DEPLOY_RBAC:-true}              # role assignments, custom role, policy (needs Owner / UAA)
+KV_PURGE_PROTECTION=${KV_PURGE_PROTECTION:-true}
+KV_SOFT_DELETE_DAYS=${KV_SOFT_DELETE_DAYS:-90}
+: "${SSH_PUBLIC_KEY:?source ../bicep/modules/set-secrets.sh first}"
+DB_PASSWORD=${DB_PASSWORD:-}
+
+SUB_ID=${ARM_SUBSCRIPTION_ID:-$(az account show --query id -o tsv)}
 az account set --subscription "$SUB_ID"
+SFX=$(printf '%s/%s' "$SUB_ID" "$RG" | sha256sum | cut -c1-6)   # stable per RG, so a re-run reuses names
 
 # ---------- Resource group ----------
-az group create -n $RG -l $LOC --tags env=dev
+az group show -n "$RG" -o none 2>/dev/null || az group create -n "$RG" -l "$LOC" --tags env=dev -o none
+RG_ID=$(az group show -n "$RG" --query id -o tsv)
+LOC=$(az group show -n "$RG" --query location -o tsv)        # an existing RG keeps its region
 
 # ---------- Storage ----------
 STG="stdemo$SFX"
-az storage account create -g $RG -n $STG -l $LOC \
+az storage account create -g "$RG" -n "$STG" -l "$LOC" \
   --sku Standard_LRS --kind StorageV2 \
-  --min-tls-version TLS1_2 --https-only true --allow-blob-public-access false
-az storage container create --account-name $STG -n data --auth-mode login
-STG_ID=$(az storage account show -g $RG -n $STG --query id -o tsv)
+  --min-tls-version TLS1_2 --https-only true --allow-blob-public-access false -o none
+az storage container create --account-name "$STG" -n data --auth-mode key -o none   # key: no data-plane role needed
+STG_ID=$(az storage account show -g "$RG" -n "$STG" --query id -o tsv)
 
 # ---------- Networking ----------
-az network nsg create -g $RG -n nsg-web
-az network nsg rule create -g $RG --nsg-name nsg-web -n Allow-HTTPS-In \
+az network nsg create -g "$RG" -n nsg-web -o none
+az network nsg rule create -g "$RG" --nsg-name nsg-web -n Allow-443-In \
   --priority 100 --direction Inbound --access Allow --protocol Tcp \
-  --source-address-prefixes '*' --destination-port-ranges 443
+  --source-address-prefixes '*' --destination-port-ranges 443 -o none
 
-az network vnet create -g $RG -n vnet-demo --address-prefixes 10.0.0.0/16 \
-  --subnet-name snet-web --subnet-prefixes 10.0.1.0/24 --network-security-group nsg-web
-az network vnet subnet create -g $RG --vnet-name vnet-demo -n snet-pe  --address-prefixes 10.0.2.0/24
-az network vnet subnet create -g $RG --vnet-name vnet-demo -n snet-aks --address-prefixes 10.0.4.0/22
+az network vnet create -g "$RG" -n vnet-demo --address-prefixes 10.0.0.0/16 \
+  --subnet-name snet-web --subnet-prefixes 10.0.1.0/24 --network-security-group nsg-web -o none
+az network vnet subnet create -g "$RG" --vnet-name vnet-demo -n snet-pe  --address-prefixes 10.0.2.0/24 --network-security-group nsg-web -o none
+az network vnet subnet create -g "$RG" --vnet-name vnet-demo -n snet-aks --address-prefixes 10.0.4.0/22 --network-security-group nsg-web -o none
 
-VNET_ID=$(az network vnet show -g $RG -n vnet-demo --query id -o tsv)
-WEB_SUBNET_ID=$(az network vnet subnet show -g $RG --vnet-name vnet-demo -n snet-web --query id -o tsv)
-AKS_SUBNET_ID=$(az network vnet subnet show -g $RG --vnet-name vnet-demo -n snet-aks --query id -o tsv)
+VNET_ID=$(az network vnet show -g "$RG" -n vnet-demo --query id -o tsv)
+WEB_SUBNET_ID=$(az network vnet subnet show -g "$RG" --vnet-name vnet-demo -n snet-web --query id -o tsv)
+AKS_SUBNET_ID=$(az network vnet subnet show -g "$RG" --vnet-name vnet-demo -n snet-aks --query id -o tsv)
 
 # Peering (needs both directions)
 # az network vnet peering create -g $RG -n demo-to-hub --vnet-name vnet-demo --remote-vnet "$HUB_VNET_ID" --allow-vnet-access --allow-forwarded-traffic
 
 # ---------- Compute: VM ----------
-az vm create -g $RG -n vm01 --image Ubuntu2404 --size Standard_B2s \
-  --admin-username azureuser --generate-ssh-keys \
-  --subnet "$WEB_SUBNET_ID" --public-ip-address "" --nsg "" \
-  --assign-identity
-VM_PRINCIPAL=$(az vm show -g $RG -n vm01 --query identity.principalId -o tsv)
+if [ "$DEPLOY_VM" = true ]; then
+  az vm create -g "$RG" -n vm01 --image Ubuntu2404 --size "$VM_SIZE" --storage-sku StandardSSD_LRS \
+    --admin-username azureuser --ssh-key-values "$SSH_PUBLIC_KEY" \
+    --subnet "$WEB_SUBNET_ID" --public-ip-address "" --nsg "" \
+    --assign-identity -o none
+fi
 
 # ---------- Compute: AKS ----------
-az aks create -g $RG -n aks-demo --node-count 2 --node-vm-size Standard_D4s_v5 \
-  --network-plugin azure --network-policy azure --vnet-subnet-id "$AKS_SUBNET_ID" \
-  --service-cidr 172.16.0.0/16 --dns-service-ip 172.16.0.10 \
-  --enable-managed-identity --enable-aad --enable-azure-rbac \
-  --enable-oidc-issuer --enable-workload-identity --generate-ssh-keys
-az aks get-credentials -g $RG -n aks-demo
+if [ "$DEPLOY_AKS" = true ]; then
+  az aks create -g "$RG" -n aks-demo --node-count 2 --node-vm-size Standard_D4s_v5 \
+    --network-plugin azure --network-policy azure --vnet-subnet-id "$AKS_SUBNET_ID" \
+    --service-cidr 172.16.0.0/16 --dns-service-ip 172.16.0.10 \
+    --enable-managed-identity --enable-aad --enable-azure-rbac \
+    --enable-oidc-issuer --enable-workload-identity --ssh-key-value "$SSH_PUBLIC_KEY" -o none
+  az aks get-credentials -g "$RG" -n aks-demo
+fi
 
 # ---------- Security: identity + Key Vault + private endpoint ----------
-az identity create -g $RG -n id-app
-UAMI_PID=$(az identity show -g $RG -n id-app --query principalId -o tsv)
+az identity create -g "$RG" -n id-app -o none
+UAMI_PID=$(az identity show -g "$RG" -n id-app --query principalId -o tsv)
 
 KV="kv-demo-$SFX"
-az keyvault create -g $RG -n $KV -l $LOC \
-  --enable-rbac-authorization true --enable-purge-protection true --retention-days 90
-KV_ID=$(az keyvault show -n $KV --query id -o tsv)
+PURGE=(); [ "$KV_PURGE_PROTECTION" = true ] && PURGE=(--enable-purge-protection true)   # can't be set to false, only omitted
+az keyvault create -g "$RG" -n "$KV" -l "$LOC" \
+  --enable-rbac-authorization true --retention-days "$KV_SOFT_DELETE_DAYS" "${PURGE[@]}" \
+  --public-network-access Disabled --default-action Deny --bypass AzureServices -o none
+KV_ID=$(az keyvault show -n "$KV" --query id -o tsv)
 
-ME=$(az ad signed-in-user show --query id -o tsv)
-az role assignment create --assignee-object-id "$ME" --assignee-principal-type User \
-  --role "Key Vault Secrets Officer" --scope "$KV_ID"
-az keyvault secret set --vault-name $KV -n db-password --value "$(openssl rand -base64 24)"
+# Secret through the ARM control plane (like Bicep / Terraform azapi): works with the vault already private
+# and needs no data-plane role. 'az keyvault secret set' would need network access + Secrets Officer.
+if [ -n "$DB_PASSWORD" ]; then
+  v=${DB_PASSWORD//\\/\\\\}; v=${v//\"/\\\"}                  # JSON-escape \ and "
+  BODY=$(umask 077; mktemp)                                   # body in a private file, not on the command line
+  printf '{"properties":{"value":"%s"}}' "$v" > "$BODY"
+  az rest --method put --url "https://management.azure.com${KV_ID}/secrets/db-password?api-version=2023-07-01" \
+    --body @"$BODY" -o none
+  rm -f "$BODY"
+fi
 
-# lock down AFTER seeding secret (data plane needs network access)
-az keyvault update -n $KV --public-network-access Disabled --default-action Deny --bypass AzureServices
+az network private-endpoint create -g "$RG" -n "pe-$KV" --vnet-name vnet-demo --subnet snet-pe \
+  --private-connection-resource-id "$KV_ID" --group-id vault --connection-name psc-kv -o none
+az network private-dns zone create -g "$RG" -n privatelink.vaultcore.azure.net -o none
+az network private-dns link vnet create -g "$RG" -n link-vnet \
+  --zone-name privatelink.vaultcore.azure.net --virtual-network "$VNET_ID" --registration-enabled false -o none
+az network private-endpoint dns-zone-group create -g "$RG" --endpoint-name "pe-$KV" -n default \
+  --private-dns-zone privatelink.vaultcore.azure.net --zone-name kv -o none
 
-az network private-endpoint create -g $RG -n pe-kv --vnet-name vnet-demo --subnet snet-pe \
-  --private-connection-resource-id "$KV_ID" --group-id vault --connection-name psc-kv
-az network private-dns zone create -g $RG -n privatelink.vaultcore.azure.net
-az network private-dns link vnet create -g $RG -n link-vnet \
-  --zone-name privatelink.vaultcore.azure.net --virtual-network "$VNET_ID" --registration-enabled false
-az network private-endpoint dns-zone-group create -g $RG --endpoint-name pe-kv -n default \
-  --private-dns-zone privatelink.vaultcore.azure.net --zone-name kv
+# ---------- RBAC (same grants as 06-rbac.bicep + kvRole in 07-security.bicep) ----------
+if [ "$DEPLOY_RBAC" = true ]; then
+  for grant in "Key Vault Secrets User|$KV_ID" "Storage Blob Data Contributor|$STG_ID" "Reader|$RG_ID"; do
+    az role assignment create --assignee-object-id "$UAMI_PID" --assignee-principal-type ServicePrincipal \
+      --role "${grant%%|*}" --scope "${grant#*|}" -o none
+  done
 
-# ---------- RBAC ----------
-az role assignment create --assignee-object-id "$UAMI_PID" --assignee-principal-type ServicePrincipal \
-  --role "Key Vault Secrets User" --scope "$KV_ID"
-az role assignment create --assignee-object-id "$UAMI_PID" --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Contributor" --scope "$STG_ID"
-az role assignment create --assignee-object-id "$VM_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-  --role Reader --scope "/subscriptions/$SUB_ID/resourceGroups/$RG"
-
-cat > /tmp/vm-operator.json <<JSON
+  ROLE_FILE=$(mktemp)
+  cat > "$ROLE_FILE" <<JSON
 {
   "Name": "VM Operator ($RG)",
   "Description": "Read, start and restart VMs",
@@ -1060,17 +1231,23 @@ cat > /tmp/vm-operator.json <<JSON
     "Microsoft.Compute/virtualMachines/restart/action"
   ],
   "NotActions": [],
-  "AssignableScopes": ["/subscriptions/$SUB_ID/resourceGroups/$RG"]
+  "AssignableScopes": ["$RG_ID"]
 }
 JSON
-az role definition create --role-definition @/tmp/vm-operator.json
-az role assignment list --assignee "$UAMI_PID" --all -o table
+  az role definition list --name "VM Operator ($RG)" --query '[0].id' -o tsv | grep -q . ||
+    az role definition create --role-definition @"$ROLE_FILE" -o none
+  rm -f "$ROLE_FILE"
+  az role assignment create --assignee-object-id "$UAMI_PID" --assignee-principal-type ServicePrincipal \
+    --role "VM Operator ($RG)" --scope "$RG_ID" -o none
+  az role assignment list --assignee "$UAMI_PID" --all -o table
 
-# ---------- Governance: Azure Policy (built-in "Allowed locations") ----------
-az policy assignment create -n allowed-locations \
-  --scope "/subscriptions/$SUB_ID/resourceGroups/$RG" \
-  --policy e56962a6-4747-49cd-b67b-bf8b01975c4c \
-  --params '{"listOfAllowedLocations":{"value":["eastus","westeurope"]}}'
+  # ---------- Governance: Azure Policy (built-in "Allowed locations") ----------
+  az policy assignment create -n allowed-locations --scope "$RG_ID" \
+    --policy e56962a6-4747-49cd-b67b-bf8b01975c4c \
+    --params '{"listOfAllowedLocations":{"value":["eastus","westeurope"]}}' -o none
+fi
+
+echo "Done: RG=$RG STG=$STG KV=$KV"
 ```
 
 ### `cli/02-deploy-templates.sh`
@@ -1078,28 +1255,35 @@ az policy assignment create -n allowed-locations \
 ```bash
 #!/usr/bin/env bash
 # TEMPLATE deployment. Rule: file scope == command scope (group | sub | mg | tenant)
+# Reference script: read it section by section. Subscription-scope lines run only with SUB_SCOPE=true.
 set -euo pipefail
-RG=rg-demo; LOC=eastus
+RG=${RG:-rg-demo}; LOC=${LOC:-eastus}
+SUB_SCOPE=${SUB_SCOPE:-false}          # true only where you may deploy at subscription scope (not on KodeKloud)
 
 # ---- Bicep ----
-az deployment sub create   -l $LOC -f ../bicep/modules/01-rg.bicep -p rgName=$RG       # targetScope='subscription'
-az deployment group create -g $RG  -f ../bicep/modules/02-storage.bicep                # default scope = RG
-az deployment group what-if -g $RG -f ../bicep/modules/03-network.bicep                # preview
-export SSH_PUBLIC_KEY="$(cat ~/.ssh/id_rsa.pub)"
-az deployment sub create   -l $LOC -f ../bicep/main.bicep -p ../bicep/main.bicepparam  # everything
+[ "$SUB_SCOPE" = true ] && az deployment sub create -l $LOC -f ../bicep/modules/01-rg.bicep -p rgName=$RG   # targetScope='subscription'
+az deployment group create  -g $RG -f ../bicep/modules/02-storage.bicep -n storage       # default scope = RG
+az deployment group what-if -g $RG -f ../bicep/modules/03-network.bicep                  # preview
+: "${SSH_PUBLIC_KEY:?source ../bicep/modules/set-secrets.sh first}"
+az deployment group create  -g $RG -p ../bicep/main-rg.bicepparam -n main-rg             # everything, existing RG
+[ "$SUB_SCOPE" = true ] && az deployment sub create -l $LOC -f ../bicep/main.bicep -p ../bicep/main.bicepparam  # everything + RG
+# Same flow, with dependency wiring done for you: ../bicep/deploy.sh <validate|what-if|create> <target>
 
 # ---- ARM JSON (same commands, .json file) ----
-az deployment sub create   -l $LOC -f ../arm/rg.json -p rgName=$RG
-az deployment group create -g $RG  -f ../arm/storage.json -p @../arm/storage.parameters.json
-az deployment group create -g $RG  -f ../arm/network.json --mode Incremental
+[ "$SUB_SCOPE" = true ] && az deployment sub create -l $LOC -f ../arm/rg.json -p rgName=$RG
+az deployment group create -g $RG -f ../arm/storage.json -p @../arm/storage.parameters.json -n storage
+az deployment group create -g $RG -f ../arm/network.json --mode Incremental -n network   # Complete would delete what's not in the file
+# Same flow: ../arm/deploy.sh <validate|what-if|create> <target>
 
 # ---- Convert ----
-az bicep build     -f ../bicep/main.bicep            # Bicep -> ARM JSON
-az bicep decompile -f ../arm/network.json            # ARM JSON -> Bicep (best effort)
+az bicep build     -f ../bicep/main.bicep --stdout >/dev/null   # Bicep -> ARM JSON
+az bicep decompile -f ../arm/network.json --force               # ARM JSON -> Bicep (best effort, writes ../arm/network.bicep)
+rm -f ../arm/network.bicep
 
 # ---- Lifecycle with deployment stacks (manages deletes) ----
 az stack group create -n stack-demo -g $RG -f ../bicep/modules/02-storage.bicep \
-  --action-on-unmanage deleteResources --deny-settings-mode denyDelete
+  --action-on-unmanage deleteResources --deny-settings-mode none --yes
+# --deny-settings-mode denyDelete also blocks deletes outside the stack; needs deploymentStacks/manageDenySetting/action (Owner or Azure Deployment Stack Owner)
 
 # ---- Inspect / troubleshoot ----
 az deployment group list -g $RG -o table

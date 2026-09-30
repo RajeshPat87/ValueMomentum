@@ -3,7 +3,8 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
-    "stgName": { "type": "string", "defaultValue": "[concat('st', uniqueString(resourceGroup().id))]", "minLength": 3, "maxLength": 24 }
+    "stgName": { "type": "string", "defaultValue": "[concat('st', uniqueString(resourceGroup().id))]", "minLength": 3, "maxLength": 24 },
+    "skuName": { "type": "string", "defaultValue": "Standard_LRS", "allowedValues": [ "Standard_LRS", "Standard_GRS", "Standard_ZRS" ] }
   },
   "resources": [
     {
@@ -11,7 +12,7 @@
       "apiVersion": "2023-05-01",
       "name": "[parameters('stgName')]",
       "location": "[parameters('location')]",
-      "sku": { "name": "Standard_LRS" },
+      "sku": { "name": "[parameters('skuName')]" },
       "kind": "StorageV2",
       "properties": {
         "minimumTlsVersion": "TLS1_2",
@@ -27,6 +28,7 @@
     }
   ],
   "outputs": {
-    "stgId": { "type": "string", "value": "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgName'))]" }
+    "stgId": { "type": "string", "value": "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgName'))]" },
+    "stgName": { "type": "string", "value": "[parameters('stgName')]" }
   }
 }

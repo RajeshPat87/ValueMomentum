@@ -6,7 +6,7 @@ set -uo pipefail
 EXECUTE=false; PURGE=false
 for a in "$@"; do case "$a" in --yes) EXECUTE=true ;; --purge) PURGE=true ;; esac; done
 
-DEPLOYMENTS=(vm security network storage aks rbac mini main-rg)
+DEPLOYMENTS=(vm security network storage aks rbac mini main-rg keyvault)  # keyvault = arm/deploy.sh
 
 IDS=$(for d in "${DEPLOYMENTS[@]}"; do
   az deployment group show -g "$RG" -n "$d" --query 'properties.outputResources[].id' -o tsv 2>/dev/null
