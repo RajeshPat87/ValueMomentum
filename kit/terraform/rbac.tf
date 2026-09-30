@@ -1,35 +1,37 @@
 # G-R-P -> TF generates the GUID; you give scope + role + principal
-resource "azurerm_role_assignment" "deployer_kv" {
-  scope                = azurerm_key_vault.kv.id
-  role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = data.azurerm_client_config.current.object_id
+# Same grants as 06-rbac.bicep + the kvRole in 07-security.bicep, all for the app UAMI, all behind deploy_rbac
+locals {
+  rbac = var.deploy_rbac ? 1 : 0
 }
 
 resource "azurerm_role_assignment" "app_kv" {
+  count                = local.rbac
   scope                = azurerm_key_vault.kv.id
   role_definition_name = "Key Vault Secrets User"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
   principal_type       = "ServicePrincipal"
 }
 
+resource "azurerm_role_assignment" "app_reader" {
+  count                = local.rbac
+  scope                = local.rg_id
+  role_definition_name = "Reader"
+  principal_id         = azurerm_user_assigned_identity.app.principal_id
+  principal_type       = "ServicePrincipal"
+}
+
 resource "azurerm_role_assignment" "app_blob" {
+  count                = local.rbac
   scope                = azurerm_storage_account.stg.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
   principal_type       = "ServicePrincipal"
 }
 
-resource "azurerm_role_assignment" "vm_reader" {
-  count                = var.deploy_vm ? 1 : 0
-  scope                = azurerm_resource_group.rg.id
-  role_definition_name = "Reader"
-  principal_id         = azurerm_linux_virtual_machine.vm[0].identity[0].principal_id
-  principal_type       = "ServicePrincipal"
-}
-
 resource "azurerm_role_definition" "vm_operator" {
-  name  = "VM Operator (${azurerm_resource_group.rg.name})"
-  scope = azurerm_resource_group.rg.id
+  count = local.rbac
+  name  = "VM Operator (${local.rg_name})"
+  scope = local.rg_id
 
   permissions {
     actions = [
@@ -40,12 +42,13 @@ resource "azurerm_role_definition" "vm_operator" {
     not_actions = []
   }
 
-  assignable_scopes = [azurerm_resource_group.rg.id]
+  assignable_scopes = [local.rg_id]
 }
 
 resource "azurerm_role_assignment" "app_vm_operator" {
-  scope              = azurerm_resource_group.rg.id
-  role_definition_id = azurerm_role_definition.vm_operator.role_definition_resource_id
+  count              = local.rbac
+  scope              = local.rg_id
+  role_definition_id = azurerm_role_definition.vm_operator[0].role_definition_resource_id
   principal_id       = azurerm_user_assigned_identity.app.principal_id
   principal_type     = "ServicePrincipal"
 }

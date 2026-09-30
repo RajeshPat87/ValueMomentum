@@ -1,7 +1,7 @@
 resource "azurerm_network_security_group" "web" {
   name                = "nsg-web"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = local.location
+  resource_group_name = local.rg_name
 
   dynamic "security_rule" {
     for_each = var.nsg_rules
@@ -20,21 +20,22 @@ resource "azurerm_network_security_group" "web" {
 }
 
 resource "azurerm_virtual_network" "vnet" {
-  name                = "vnet-${local.name}"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  name                = "vnet-demo"
+  location            = local.location
+  resource_group_name = local.rg_name
   address_space       = ["10.0.0.0/16"]
 }
 
 resource "azurerm_subnet" "snet" {
   for_each             = var.subnets
   name                 = "snet-${each.key}"
-  resource_group_name  = azurerm_resource_group.rg.name
+  resource_group_name  = local.rg_name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = [each.value]
 }
 
-resource "azurerm_subnet_network_security_group_association" "web" {
-  subnet_id                 = azurerm_subnet.snet["web"].id
+resource "azurerm_subnet_network_security_group_association" "snet" {
+  for_each                  = azurerm_subnet.snet # every subnet, as in 03-network.bicep
+  subnet_id                 = each.value.id
   network_security_group_id = azurerm_network_security_group.web.id
 }

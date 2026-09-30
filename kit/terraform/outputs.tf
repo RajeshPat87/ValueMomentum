@@ -1,9 +1,17 @@
 output "rg_name" {
-  value = azurerm_resource_group.rg.name
+  value = local.rg_name
+}
+
+output "kv_name" {
+  value = azurerm_key_vault.kv.name
 }
 
 output "key_vault_uri" {
   value = azurerm_key_vault.kv.vault_uri
+}
+
+output "stg_name" {
+  value = azurerm_storage_account.stg.name
 }
 
 output "subnet_ids" {

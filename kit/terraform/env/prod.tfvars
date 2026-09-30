@@ -1,0 +1,9 @@
+# prod = secure defaults: role assignments on, purge protection on (permanent), 90-day soft delete
+env                 = "prod"
+location            = "eastus"
+vm_size             = "Standard_B1s"
+deploy_vm           = true
+deploy_aks          = false
+deploy_rbac         = true
+kv_purge_protection = true
+kv_soft_delete_days = 90

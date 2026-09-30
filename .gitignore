@@ -3,6 +3,8 @@ az-login.sh
 **/az-login.sh
 *.tfvars
 !*.tfvars.example
+# per-env Terraform flags, no secrets (like .bicepparam)
+!kit/terraform/env/*.tfvars
 .env
 *.pem
 
@@ -12,6 +14,7 @@ az-login.sh
 *.tfstate
 *.tfstate.*
 *.tfplan
+tfplan
 crash.log
 
 # Windows download metadata (WSL)

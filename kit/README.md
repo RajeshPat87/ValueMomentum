@@ -120,7 +120,7 @@ Repeat any file you missed on day +1, +3 and +7.
 bicep/     main.bicep, main-rg.bicep (+ .bicepparam), deploy.sh, modules/01-rg … 07-security
 arm/       rg, storage(+params), network, vm(+KV-reference params), rbac, keyvault
 cli/       01-direct-create.sh, 02-deploy-templates.sh
-terraform/ providers, variables, main, network, compute, security, rbac, outputs, tfvars, commands
+terraform/ providers, variables, main, network, compute, security, rbac, outputs, env/<env>.tfvars, deploy.sh, bootstrap-state.sh
 pipelines/ azure-pipelines.yml, templates/ (bicep|terraform)-(validate|deploy), examples/
 ```
 
@@ -1117,17 +1117,13 @@ terraform {
   required_version = ">= 1.6"
   required_providers {
     azurerm = { source = "hashicorp/azurerm", version = "~> 4.0" }
+    azapi   = { source = "azure/azapi", version = "~> 2.0" } # ARM control-plane writes (Key Vault secret)
     random  = { source = "hashicorp/random", version = "~> 3.6" }
   }
 
-  backend "azurerm" {
-    resource_group_name  = "rg-tfstate"
-    storage_account_name = "sttfstate001"
-    container_name       = "tfstate"
-    key                  = "demo.terraform.tfstate"
-    use_oidc             = true
-    use_azuread_auth     = true
-  }
+  # Partial backend: deploy.sh passes resource_group_name / storage_account_name / container_name / key at init.
+  # Create the storage account once with ./bootstrap-state.sh. Auth follows ARM_* env (client secret locally, OIDC in the pipeline).
+  backend "azurerm" {}
 }
 
 provider "azurerm" {
@@ -1138,6 +1134,8 @@ provider "azurerm" {
   }
   subscription_id = var.subscription_id # mandatory in azurerm 4.x
 }
+
+provider "azapi" {}
 
 data "azurerm_client_config" "current" {}
 ```
@@ -1158,9 +1156,16 @@ variable "env" {
   }
 }
 
+variable "resource_group_name" {
+  description = "Existing RG to deploy into (like main-rg.bicep). Empty = create rg-demo-<env> (like main.bicep)."
+  type        = string
+  default     = ""
+}
+
 variable "location" {
-  type    = string
-  default = "eastus"
+  description = "Used only when this config creates the RG; an existing RG keeps its own location."
+  type        = string
+  default     = "eastus"
 }
 
 variable "subnets" {
@@ -1175,8 +1180,17 @@ variable "subnets" {
 variable "nsg_rules" {
   type = list(object({ name = string, priority = number, port = string }))
   default = [
-    { name = "Allow-HTTPS-In", priority = 100, port = "443" },
+    { name = "Allow-443-In", priority = 100, port = "443" },
   ]
+}
+
+variable "vm_size" {
+  type    = string
+  default = "Standard_B1s"
+  validation {
+    condition     = contains(["Standard_B1s", "Standard_B2s", "Standard_D2s_v5"], var.vm_size)
+    error_message = "vm_size must be Standard_B1s, Standard_B2s or Standard_D2s_v5 (same list as 04-vm.bicep)."
+  }
 }
 
 variable "deploy_vm" {
@@ -1189,21 +1203,44 @@ variable "deploy_aks" {
   default = false
 }
 
+variable "deploy_rbac" {
+  description = "Role assignments, custom role and policy assignment. False where the deployer lacks roleAssignments/write."
+  type        = bool
+  default     = true
+}
+
+variable "kv_purge_protection" {
+  description = "Permanent once enabled; some policies forbid it."
+  type        = bool
+  default     = true
+}
+
+variable "kv_soft_delete_days" {
+  type    = number
+  default = 90
+  validation {
+    condition     = var.kv_soft_delete_days >= 7 && var.kv_soft_delete_days <= 90
+    error_message = "kv_soft_delete_days must be 7-90."
+  }
+}
+
 variable "ssh_public_key" {
   type      = string
   sensitive = true
 }
 
 variable "db_password" {
-  type      = string
-  sensitive = true
+  description = "Optional; stored as secret db-password when set."
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 ```
 
 ### `terraform/main.tf`
 
 ```hcl
-# ---------- Resource group + storage ----------
+# ---------- Resource group (existing or created) + storage ----------
 resource "random_string" "sfx" {
   length  = 6
   special = false
@@ -1211,20 +1248,31 @@ resource "random_string" "sfx" {
 }
 
 locals {
-  name = "demo-${var.env}"
-  tags = { env = var.env, managed_by = "terraform" }
+  name      = "demo-${var.env}"
+  tags      = { env = var.env, managed_by = "terraform" }
+  create_rg = var.resource_group_name == ""
+
+  rg_name  = local.create_rg ? azurerm_resource_group.rg[0].name : data.azurerm_resource_group.existing[0].name
+  rg_id    = local.create_rg ? azurerm_resource_group.rg[0].id : data.azurerm_resource_group.existing[0].id
+  location = local.create_rg ? azurerm_resource_group.rg[0].location : data.azurerm_resource_group.existing[0].location
 }
 
 resource "azurerm_resource_group" "rg" {
+  count    = local.create_rg ? 1 : 0
   name     = "rg-${local.name}"
   location = var.location
   tags     = local.tags
 }
 
+data "azurerm_resource_group" "existing" {
+  count = local.create_rg ? 0 : 1
+  name  = var.resource_group_name
+}
+
 resource "azurerm_storage_account" "stg" {
   name                            = "st${var.env}${random_string.sfx.result}"
-  resource_group_name             = azurerm_resource_group.rg.name
-  location                        = azurerm_resource_group.rg.location
+  resource_group_name             = local.rg_name
+  location                        = local.location
   account_tier                    = "Standard"
   account_replication_type        = "LRS"
   account_kind                    = "StorageV2"
@@ -1246,8 +1294,8 @@ resource "azurerm_storage_container" "data" {
 ```hcl
 resource "azurerm_network_security_group" "web" {
   name                = "nsg-web"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = local.location
+  resource_group_name = local.rg_name
 
   dynamic "security_rule" {
     for_each = var.nsg_rules
@@ -1266,22 +1314,23 @@ resource "azurerm_network_security_group" "web" {
 }
 
 resource "azurerm_virtual_network" "vnet" {
-  name                = "vnet-${local.name}"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  name                = "vnet-demo"
+  location            = local.location
+  resource_group_name = local.rg_name
   address_space       = ["10.0.0.0/16"]
 }
 
 resource "azurerm_subnet" "snet" {
   for_each             = var.subnets
   name                 = "snet-${each.key}"
-  resource_group_name  = azurerm_resource_group.rg.name
+  resource_group_name  = local.rg_name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = [each.value]
 }
 
-resource "azurerm_subnet_network_security_group_association" "web" {
-  subnet_id                 = azurerm_subnet.snet["web"].id
+resource "azurerm_subnet_network_security_group_association" "snet" {
+  for_each                  = azurerm_subnet.snet # every subnet, as in 03-network.bicep
+  subnet_id                 = each.value.id
   network_security_group_id = azurerm_network_security_group.web.id
 }
 ```
@@ -1293,8 +1342,8 @@ resource "azurerm_subnet_network_security_group_association" "web" {
 resource "azurerm_network_interface" "vm" {
   count               = var.deploy_vm ? 1 : 0
   name                = "nic-vm01"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = local.location
+  resource_group_name = local.rg_name
 
   ip_configuration {
     name                          = "ipconfig1"
@@ -1306,9 +1355,9 @@ resource "azurerm_network_interface" "vm" {
 resource "azurerm_linux_virtual_machine" "vm" {
   count                 = var.deploy_vm ? 1 : 0
   name                  = "vm01"
-  resource_group_name   = azurerm_resource_group.rg.name
-  location              = azurerm_resource_group.rg.location
-  size                  = "Standard_B2s"
+  resource_group_name   = local.rg_name
+  location              = local.location
+  size                  = var.vm_size
   admin_username        = "azureuser"
   network_interface_ids = [azurerm_network_interface.vm[0].id]
 
@@ -1319,7 +1368,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
 
   os_disk {
     caching              = "ReadWrite"
-    storage_account_type = "Premium_LRS"
+    storage_account_type = "StandardSSD_LRS"
   }
 
   source_image_reference {
@@ -1337,10 +1386,10 @@ resource "azurerm_linux_virtual_machine" "vm" {
 # ---------- AKS ----------
 resource "azurerm_kubernetes_cluster" "aks" {
   count                     = var.deploy_aks ? 1 : 0
-  name                      = "aks-${local.name}"
-  location                  = azurerm_resource_group.rg.location
-  resource_group_name       = azurerm_resource_group.rg.name
-  dns_prefix                = "aks${var.env}"
+  name                      = "aks-demo"
+  location                  = local.location
+  resource_group_name       = local.rg_name
+  dns_prefix                = "aks-demo"
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
 
@@ -1373,37 +1422,39 @@ resource "azurerm_kubernetes_cluster" "aks" {
 
 ```hcl
 # G-R-P -> TF generates the GUID; you give scope + role + principal
-resource "azurerm_role_assignment" "deployer_kv" {
-  scope                = azurerm_key_vault.kv.id
-  role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = data.azurerm_client_config.current.object_id
+# Same grants as 06-rbac.bicep + the kvRole in 07-security.bicep, all for the app UAMI, all behind deploy_rbac
+locals {
+  rbac = var.deploy_rbac ? 1 : 0
 }
 
 resource "azurerm_role_assignment" "app_kv" {
+  count                = local.rbac
   scope                = azurerm_key_vault.kv.id
   role_definition_name = "Key Vault Secrets User"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
   principal_type       = "ServicePrincipal"
 }
 
+resource "azurerm_role_assignment" "app_reader" {
+  count                = local.rbac
+  scope                = local.rg_id
+  role_definition_name = "Reader"
+  principal_id         = azurerm_user_assigned_identity.app.principal_id
+  principal_type       = "ServicePrincipal"
+}
+
 resource "azurerm_role_assignment" "app_blob" {
+  count                = local.rbac
   scope                = azurerm_storage_account.stg.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
   principal_type       = "ServicePrincipal"
 }
 
-resource "azurerm_role_assignment" "vm_reader" {
-  count                = var.deploy_vm ? 1 : 0
-  scope                = azurerm_resource_group.rg.id
-  role_definition_name = "Reader"
-  principal_id         = azurerm_linux_virtual_machine.vm[0].identity[0].principal_id
-  principal_type       = "ServicePrincipal"
-}
-
 resource "azurerm_role_definition" "vm_operator" {
-  name  = "VM Operator (${azurerm_resource_group.rg.name})"
-  scope = azurerm_resource_group.rg.id
+  count = local.rbac
+  name  = "VM Operator (${local.rg_name})"
+  scope = local.rg_id
 
   permissions {
     actions = [
@@ -1414,12 +1465,13 @@ resource "azurerm_role_definition" "vm_operator" {
     not_actions = []
   }
 
-  assignable_scopes = [azurerm_resource_group.rg.id]
+  assignable_scopes = [local.rg_id]
 }
 
 resource "azurerm_role_assignment" "app_vm_operator" {
-  scope              = azurerm_resource_group.rg.id
-  role_definition_id = azurerm_role_definition.vm_operator.role_definition_resource_id
+  count              = local.rbac
+  scope              = local.rg_id
+  role_definition_id = azurerm_role_definition.vm_operator[0].role_definition_resource_id
   principal_id       = azurerm_user_assigned_identity.app.principal_id
   principal_type     = "ServicePrincipal"
 }
@@ -1430,20 +1482,20 @@ resource "azurerm_role_assignment" "app_vm_operator" {
 ```hcl
 resource "azurerm_user_assigned_identity" "app" {
   name                = "id-app"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = local.location
+  resource_group_name = local.rg_name
 }
 
 # R-S-P-N: RBAC, Soft delete, Purge protection, Network deny
 resource "azurerm_key_vault" "kv" {
   name                          = "kv-${var.env}-${random_string.sfx.result}"
-  location                      = azurerm_resource_group.rg.location
-  resource_group_name           = azurerm_resource_group.rg.name
+  location                      = local.location
+  resource_group_name           = local.rg_name
   tenant_id                     = data.azurerm_client_config.current.tenant_id
   sku_name                      = "standard"
-  enable_rbac_authorization     = true # newer 4.x name: rbac_authorization_enabled
-  purge_protection_enabled      = true
-  soft_delete_retention_days    = 90
+  rbac_authorization_enabled    = true
+  purge_protection_enabled      = var.kv_purge_protection
+  soft_delete_retention_days    = var.kv_soft_delete_days
   public_network_access_enabled = false
 
   network_acls {
@@ -1452,30 +1504,32 @@ resource "azurerm_key_vault" "kv" {
   }
 }
 
-# Data-plane write: runner must reach the vault (self-hosted agent in VNet, or allow its IP)
-resource "azurerm_key_vault_secret" "db" {
-  name         = "db-password"
-  value        = var.db_password
-  key_vault_id = azurerm_key_vault.kv.id
-  depends_on   = [azurerm_role_assignment.deployer_kv, azurerm_private_endpoint.kv]
+# Written through the ARM control plane (same as 07-security.bicep), so it works while public access is disabled
+# and the deployer needs no data-plane role. azurerm_key_vault_secret would need network access to the vault.
+resource "azapi_resource" "db_password" {
+  count          = nonsensitive(var.db_password != "") ? 1 : 0
+  type           = "Microsoft.KeyVault/vaults/secrets@2023-07-01"
+  name           = "db-password"
+  parent_id      = azurerm_key_vault.kv.id
+  sensitive_body = { properties = { value = var.db_password } }
 }
 
 resource "azurerm_private_dns_zone" "kv" {
   name                = "privatelink.vaultcore.azure.net"
-  resource_group_name = azurerm_resource_group.rg.name
+  resource_group_name = local.rg_name
 }
 
 resource "azurerm_private_dns_zone_virtual_network_link" "kv" {
   name                  = "link-vnet"
-  resource_group_name   = azurerm_resource_group.rg.name
+  resource_group_name   = local.rg_name
   private_dns_zone_name = azurerm_private_dns_zone.kv.name
   virtual_network_id    = azurerm_virtual_network.vnet.id
 }
 
 resource "azurerm_private_endpoint" "kv" {
-  name                = "pe-kv"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  name                = "pe-${azurerm_key_vault.kv.name}"
+  location            = local.location
+  resource_group_name = local.rg_name
   subnet_id           = azurerm_subnet.snet["pe"].id
 
   private_service_connection {
@@ -1491,10 +1545,11 @@ resource "azurerm_private_endpoint" "kv" {
   }
 }
 
-# Governance: built-in "Allowed locations"
+# Governance: built-in "Allowed locations" (policyAssignments/write, so it sits behind deploy_rbac)
 resource "azurerm_resource_group_policy_assignment" "allowed_locations" {
+  count                = var.deploy_rbac ? 1 : 0
   name                 = "allowed-locations"
-  resource_group_id    = azurerm_resource_group.rg.id
+  resource_group_id    = local.rg_id
   policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/e56962a6-4747-49cd-b67b-bf8b01975c4c"
   parameters = jsonencode({
     listOfAllowedLocations = { value = ["eastus", "westeurope"] }
@@ -1506,11 +1561,19 @@ resource "azurerm_resource_group_policy_assignment" "allowed_locations" {
 
 ```hcl
 output "rg_name" {
-  value = azurerm_resource_group.rg.name
+  value = local.rg_name
+}
+
+output "kv_name" {
+  value = azurerm_key_vault.kv.name
 }
 
 output "key_vault_uri" {
   value = azurerm_key_vault.kv.vault_uri
+}
+
+output "stg_name" {
+  value = azurerm_storage_account.stg.name
 }
 
 output "subnet_ids" {
@@ -1522,20 +1585,141 @@ output "aks_oidc_issuer" {
 }
 ```
 
+### `terraform/env/dev.tfvars`
+
+```hcl
+# dev = KodeKloud-style playground: RG-scoped SPN, restrictive Key Vault policy (same flags as main-rg.bicepparam)
+# No secrets here. RG, SSH key and DB password come from env (deploy.sh maps RG/SSH_PUBLIC_KEY/DB_PASSWORD to TF_VAR_*).
+env                 = "dev"
+location            = "eastus"
+vm_size             = "Standard_B1s"
+deploy_vm           = true
+deploy_aks          = false
+deploy_rbac         = false
+kv_purge_protection = false
+kv_soft_delete_days = 7
+```
+
+### `terraform/env/prod.tfvars`
+
+```hcl
+# prod = secure defaults: role assignments on, purge protection on (permanent), 90-day soft delete
+env                 = "prod"
+location            = "eastus"
+vm_size             = "Standard_B1s"
+deploy_vm           = true
+deploy_aks          = false
+deploy_rbac         = true
+kv_purge_protection = true
+kv_soft_delete_days = 90
+```
+
+### `terraform/bootstrap-state.sh`
+
+Run once per RG before the first plan; the pipeline runs it on every plan (idempotent).
+
+```bash
+#!/usr/bin/env bash
+# bootstrap-state.sh — create the Terraform state storage once (idempotent; safe to re-run)
+#   ./bootstrap-state.sh              create account + container in $TFSTATE_RG (default: $RG)
+#   ./bootstrap-state.sh --name-only  print the account name deploy.sh will use, create nothing
+#
+# Env: RG or TFSTATE_RG (where the account lives), TFSTATE_ACCOUNT (default: derived from subscription + RG),
+#      TFSTATE_CONTAINER (default tfstate)
+# Needs only RG Contributor: the backend uses the account key (listKeys), not a data-plane role.
+set -euo pipefail
+
+TFSTATE_RG=${TFSTATE_RG:-${RG:-}}
+: "${TFSTATE_RG:?export RG (or TFSTATE_RG) first}"
+TFSTATE_CONTAINER=${TFSTATE_CONTAINER:-tfstate}
+if [ -z "${TFSTATE_ACCOUNT:-}" ]; then
+  sub=$(az account show --query id -o tsv)
+  TFSTATE_ACCOUNT="sttf$(printf '%s/%s' "$sub" "$TFSTATE_RG" | sha256sum | cut -c1-12)"   # 16 chars, stable per RG
+fi
+
+if [ "${1:-}" = --name-only ]; then echo "$TFSTATE_ACCOUNT"; exit 0; fi
+
+echo "==> state account $TFSTATE_ACCOUNT in $TFSTATE_RG"
+az storage account create -g "$TFSTATE_RG" -n "$TFSTATE_ACCOUNT" \
+  --sku Standard_LRS --kind StorageV2 --min-tls-version TLS1_2 \
+  --https-only true --allow-blob-public-access false -o none
+az storage container create --account-name "$TFSTATE_ACCOUNT" -n "$TFSTATE_CONTAINER" --auth-mode key -o none
+echo "ready: export TFSTATE_RG=$TFSTATE_RG TFSTATE_ACCOUNT=$TFSTATE_ACCOUNT"
+```
+
+### `terraform/deploy.sh`
+
+Called by `terraform-deploy.yml`; run it locally the same way: `./deploy.sh plan dev`.
+
+```bash
+#!/usr/bin/env bash
+# deploy.sh <action> <env> — one entry point for local runs AND the pipeline (kit/pipelines/templates/terraform-deploy.yml)
+#
+#   action : plan     init + plan -> ./tfplan   (exit 0 no changes, 2 changes, 1 error)
+#            apply    init + apply ./tfplan     (run plan first; the pipeline downloads it)
+#            destroy  init + destroy            (interactive locally)
+#   env    : dev | prod   -> env/<env>.tfvars, state key <env>.tfstate
+#
+# Env: RG             existing RG to deploy into (unset = Terraform creates rg-demo-<env>)
+#      SSH_PUBLIC_KEY, DB_PASSWORD           (source ../bicep/modules/set-secrets.sh locally)
+#      TFSTATE_RG, TFSTATE_ACCOUNT           (defaults: $RG and the name bootstrap-state.sh derives)
+#      TFSTATE_CONTAINER (tfstate), TFSTATE_AZUREAD_AUTH (false = account key, needs only Contributor)
+#      ARM_* auth: az-login.sh exports a client secret locally; the pipeline exports OIDC
+set -euo pipefail
+cd "$(dirname "$0")"
+
+usage() { sed -n '2,15p' "$0" >&2; exit 2; }
+action=${1:-}; env=${2:-}
+case "$action" in plan|apply|destroy) ;; *) usage ;; esac
+[ -f "env/$env.tfvars" ] || usage
+
+export ARM_SUBSCRIPTION_ID=${ARM_SUBSCRIPTION_ID:-$(az account show --query id -o tsv)}
+export TF_VAR_subscription_id=$ARM_SUBSCRIPTION_ID
+export TF_VAR_resource_group_name=${RG:-}
+export TF_VAR_ssh_public_key=${SSH_PUBLIC_KEY:?source set-secrets.sh or set SSH_PUBLIC_KEY}
+export TF_VAR_db_password=${DB_PASSWORD:-}
+
+export TFSTATE_RG=${TFSTATE_RG:-${RG:-}}
+: "${TFSTATE_RG:?set TFSTATE_RG when RG is unset (Terraform creates the RG, state must live elsewhere)}"
+TFSTATE_ACCOUNT=${TFSTATE_ACCOUNT:-$(./bootstrap-state.sh --name-only)}
+
+echo "==> terraform $action  env=$env  rg=${RG:-<create rg-demo-$env>}  state=$TFSTATE_ACCOUNT/$env.tfstate"
+terraform init -input=false -reconfigure \
+  -backend-config="resource_group_name=$TFSTATE_RG" \
+  -backend-config="storage_account_name=$TFSTATE_ACCOUNT" \
+  -backend-config="container_name=${TFSTATE_CONTAINER:-tfstate}" \
+  -backend-config="key=$env.tfstate" \
+  -backend-config="use_azuread_auth=${TFSTATE_AZUREAD_AUTH:-false}"
+
+case "$action" in
+  plan)    rc=0; terraform plan -input=false -var-file="env/$env.tfvars" -detailed-exitcode -out=tfplan || rc=$?
+           exit "$rc" ;;
+  apply)   [ -f tfplan ] || { echo "ERROR: no ./tfplan. Run: ./deploy.sh plan $env" >&2; exit 1; }
+           terraform apply -input=false tfplan
+           terraform output ;;
+  destroy) terraform destroy -input=false -var-file="env/$env.tfvars" ;;
+esac
+```
+
 ### `terraform/terraform.tfvars.example`
 
 ```hcl
+# Optional local overrides (copy to terraform.tfvars, git-ignored). deploy.sh already sets subscription_id,
+# resource_group_name, ssh_public_key and db_password from env, and env/<env>.tfvars wins over this file.
 subscription_id = "<subscription-id>"
-env             = "dev"
-location        = "eastus"
-deploy_vm       = true
-deploy_aks      = false
-# pass secrets via env: TF_VAR_ssh_public_key, TF_VAR_db_password
 ```
 
 ### `terraform/commands.md`
 
 ```bash
+# This kit: deploy.sh wraps init (backend per env) + plan/apply/destroy, same as the pipeline
+source ../bicep/modules/set-secrets.sh && export RG=<kml_rg_...>
+./bootstrap-state.sh            # once: state storage account in $RG
+./deploy.sh plan dev            # exit 0 none, 2 changes
+./deploy.sh apply dev           # applies ./tfplan
+./deploy.sh destroy dev
+
+# Raw commands
 terraform init -backend-config="key=dev.tfstate"
 terraform fmt -recursive -check
 terraform validate
@@ -1582,12 +1766,13 @@ Output-variable lookup: same stage `dependencies.<Job>.outputs['<step>.<var>']` 
 # The ONE pipeline for this kit. Pick a tool when you queue a run; each side is validate -> dev -> prod.
 #
 #   tool: bicep      bicep-validate.yml    -> bicep-deploy.yml     (dev, prod)   calls kit/bicep/deploy.sh <action> <target>
-#   tool: terraform  terraform-validate.yml -> terraform-deploy.yml (dev, prod)   plan -> approval -> apply
+#   tool: terraform  terraform-validate.yml -> terraform-deploy.yml (dev, prod)   calls kit/terraform/deploy.sh plan|apply <env>
 #
 # Prod runs only from main. PRs stop at what-if / plan.
 # One-time ADO setup per environment <env> in (dev, prod):
 #   service connection sc-azure-<env>  (ARM, workload identity federation)
-#   variable group     vg-iac-<env>    RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret), EXTRA_PARAMS (optional, Bicep)
+#   variable group     vg-iac-<env>    RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret)
+#                                      optional: EXTRA_PARAMS (Bicep), TFSTATE_RG / TFSTATE_ACCOUNT (Terraform)
 #   environment        <env>           add approvals on prod
 parameters:
 - name: tool
@@ -1797,9 +1982,11 @@ stages:
 
 ```yaml
 # Terraform deploy for one environment: plan -> approval -> apply the SAME saved plan (mirror of bicep-deploy.yml)
+# Every step calls kit/terraform/deploy.sh, the same script you run locally.
+#
 # Same naming convention as Bicep: sc-azure-<env> | vg-iac-<env> | ADO environment <env>
-# Variable group holds: SSH_PUBLIC_KEY, DB_PASSWORD (secret). terraform.tfvars is git-ignored, so inputs come in as TF_VAR_*.
-# State: backend in providers.tf, one key per environment (<env>.tfstate). Apply is skipped when the plan has no changes.
+# Variable group holds: RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret); optional TFSTATE_RG / TFSTATE_ACCOUNT
+# Flags per environment live in kit/terraform/env/<env>.tfvars. State: <TFSTATE_ACCOUNT>/tfstate/<env>.tfstate
 parameters:
 - name: environment
   type: string
@@ -1812,6 +1999,12 @@ stages:
   displayName: Terraform ${{ parameters.environment }}
   dependsOn: ${{ parameters.dependsOn }}
   variables:
+  - name: RG                         # defaults; the variable group overrides them when set
+    value: ''
+  - name: TFSTATE_RG
+    value: ''
+  - name: TFSTATE_ACCOUNT
+    value: ''
   - group: vg-iac-${{ parameters.environment }}
   jobs:
   - job: plan
@@ -1822,23 +2015,24 @@ stages:
     - checkout: self
     - task: AzureCLI@2
       name: planStep
-      displayName: terraform plan
-      env:
-        TF_VAR_env: ${{ parameters.environment }}
-        TF_VAR_ssh_public_key: $(SSH_PUBLIC_KEY)
-        TF_VAR_db_password: $(DB_PASSWORD)
+      displayName: deploy.sh plan
+      env:                           # secrets reach scripts only through env:
+        RG: $(RG)
+        TFSTATE_RG: $(TFSTATE_RG)
+        TFSTATE_ACCOUNT: $(TFSTATE_ACCOUNT)
+        SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
+        DB_PASSWORD: $(DB_PASSWORD)
       inputs:
         azureSubscription: sc-azure-${{ parameters.environment }}
         scriptType: bash
         scriptLocation: inlineScript
-        addSpnToEnvironment: true          # exposes servicePrincipalId / tenantId / idToken for OIDC
+        addSpnToEnvironment: true    # exposes servicePrincipalId / tenantId / idToken for OIDC
         workingDirectory: kit/terraform
         inlineScript: |
           set -euo pipefail
           export ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId ARM_OIDC_TOKEN=$idToken ARM_USE_OIDC=true
-          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv) TF_VAR_subscription_id=$(az account show --query id -o tsv)
-          terraform init -input=false -backend-config="key=${{ parameters.environment }}.tfstate"
-          rc=0; terraform plan -input=false -detailed-exitcode -out=tfplan || rc=$?   # 0 none, 1 error, 2 changes
+          ./bootstrap-state.sh                                # idempotent: state account + container
+          rc=0; ./deploy.sh plan ${{ parameters.environment }} || rc=$?   # 0 none, 1 error, 2 changes
           [ "$rc" -eq 1 ] && exit 1
           echo "##vso[task.setvariable variable=hasChanges;isOutput=true]$([ "$rc" -eq 2 ] && echo true || echo false)"
           mkdir -p "$(Build.ArtifactStagingDirectory)/tfplan"
@@ -1852,7 +2046,7 @@ stages:
     condition: >-
       and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'),
           eq(dependencies.plan.outputs['planStep.hasChanges'], 'true'))
-    environment: ${{ parameters.environment }}
+    environment: ${{ parameters.environment }}   # approvals live here
     pool:
       vmImage: ubuntu-latest
     strategy:
@@ -1863,7 +2057,13 @@ stages:
           - download: current
             artifact: tfplan_${{ parameters.environment }}
           - task: AzureCLI@2
-            displayName: terraform apply
+            displayName: deploy.sh apply
+            env:
+              RG: $(RG)
+              TFSTATE_RG: $(TFSTATE_RG)
+              TFSTATE_ACCOUNT: $(TFSTATE_ACCOUNT)
+              SSH_PUBLIC_KEY: $(SSH_PUBLIC_KEY)
+              DB_PASSWORD: $(DB_PASSWORD)
             inputs:
               azureSubscription: sc-azure-${{ parameters.environment }}
               scriptType: bash
@@ -1873,10 +2073,8 @@ stages:
               inlineScript: |
                 set -euo pipefail
                 export ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId ARM_OIDC_TOKEN=$idToken ARM_USE_OIDC=true
-                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-                cp $(Pipeline.Workspace)/tfplan_${{ parameters.environment }}/.terraform.lock.hcl .
-                terraform init -input=false -backend-config="key=${{ parameters.environment }}.tfstate"
-                terraform apply -input=false $(Pipeline.Workspace)/tfplan_${{ parameters.environment }}/tfplan
+                cp $(Pipeline.Workspace)/tfplan_${{ parameters.environment }}/{tfplan,.terraform.lock.hcl} .
+                ./deploy.sh apply ${{ parameters.environment }}
 ```
 
 ### `bicep/deploy.sh`

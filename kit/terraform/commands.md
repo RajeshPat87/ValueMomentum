@@ -1,3 +1,11 @@
+# This kit: deploy.sh wraps init (backend per env) + plan/apply/destroy, same as the pipeline
+source ../bicep/modules/set-secrets.sh && export RG=<kml_rg_...>
+./bootstrap-state.sh            # once: state storage account in $RG
+./deploy.sh plan dev            # exit 0 none, 2 changes
+./deploy.sh apply dev           # applies ./tfplan
+./deploy.sh destroy dev
+
+# Raw commands
 terraform init -backend-config="key=dev.tfstate"
 terraform fmt -recursive -check
 terraform validate

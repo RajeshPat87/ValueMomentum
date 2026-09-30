@@ -1,12 +1,13 @@
 # The ONE pipeline for this kit. Pick a tool when you queue a run; each side is validate -> dev -> prod.
 #
 #   tool: bicep      bicep-validate.yml    -> bicep-deploy.yml     (dev, prod)   calls kit/bicep/deploy.sh <action> <target>
-#   tool: terraform  terraform-validate.yml -> terraform-deploy.yml (dev, prod)   plan -> approval -> apply
+#   tool: terraform  terraform-validate.yml -> terraform-deploy.yml (dev, prod)   calls kit/terraform/deploy.sh plan|apply <env>
 #
 # Prod runs only from main. PRs stop at what-if / plan.
 # One-time ADO setup per environment <env> in (dev, prod):
 #   service connection sc-azure-<env>  (ARM, workload identity federation)
-#   variable group     vg-iac-<env>    RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret), EXTRA_PARAMS (optional, Bicep)
+#   variable group     vg-iac-<env>    RG, SSH_PUBLIC_KEY, DB_PASSWORD (secret)
+#                                      optional: EXTRA_PARAMS (Bicep), TFSTATE_RG / TFSTATE_ACCOUNT (Terraform)
 #   environment        <env>           add approvals on prod
 parameters:
 - name: tool

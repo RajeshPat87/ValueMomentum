@@ -20,4 +20,5 @@ See [`kit/README.md`](kit/README.md) for the full walkthrough and
 Nothing secret is committed. Locally create:
 
 - `kit/bicep/modules/az-login.sh` — service-principal login (git-ignored)
-- `kit/terraform/terraform.tfvars` — copy from `terraform.tfvars.example` (git-ignored)
+- `kit/terraform/terraform.tfvars` — optional local overrides, copy from `terraform.tfvars.example` (git-ignored).
+  Per-environment flags are committed in `kit/terraform/env/<env>.tfvars`; secrets come from env vars.

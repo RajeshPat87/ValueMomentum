@@ -2,8 +2,8 @@
 resource "azurerm_network_interface" "vm" {
   count               = var.deploy_vm ? 1 : 0
   name                = "nic-vm01"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = local.location
+  resource_group_name = local.rg_name
 
   ip_configuration {
     name                          = "ipconfig1"
@@ -15,9 +15,9 @@ resource "azurerm_network_interface" "vm" {
 resource "azurerm_linux_virtual_machine" "vm" {
   count                 = var.deploy_vm ? 1 : 0
   name                  = "vm01"
-  resource_group_name   = azurerm_resource_group.rg.name
-  location              = azurerm_resource_group.rg.location
-  size                  = "Standard_B2s"
+  resource_group_name   = local.rg_name
+  location              = local.location
+  size                  = var.vm_size
   admin_username        = "azureuser"
   network_interface_ids = [azurerm_network_interface.vm[0].id]
 
@@ -28,7 +28,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
 
   os_disk {
     caching              = "ReadWrite"
-    storage_account_type = "Premium_LRS"
+    storage_account_type = "StandardSSD_LRS"
   }
 
   source_image_reference {
@@ -46,10 +46,10 @@ resource "azurerm_linux_virtual_machine" "vm" {
 # ---------- AKS ----------
 resource "azurerm_kubernetes_cluster" "aks" {
   count                     = var.deploy_aks ? 1 : 0
-  name                      = "aks-${local.name}"
-  location                  = azurerm_resource_group.rg.location
-  resource_group_name       = azurerm_resource_group.rg.name
-  dns_prefix                = "aks${var.env}"
+  name                      = "aks-demo"
+  location                  = local.location
+  resource_group_name       = local.rg_name
+  dns_prefix                = "aks-demo"
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
 
